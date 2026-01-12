@@ -1,5 +1,6 @@
 // src/index.ts
 
+import { PluginCommands } from "molstar/lib/mol-plugin/commands";
 import { PluginContext } from "molstar/lib/mol-plugin/context";
 import { DefaultPluginSpec } from "molstar/lib/mol-plugin/spec";
 import { StateObjectSelector, StateSelection } from "molstar/lib/mol-state";
@@ -11,7 +12,6 @@ import { Mat4 } from "molstar/lib/mol-math/linear-algebra";
 import { DownloadDensity } from "molstar/lib/mol-plugin-state/actions/volume";
 import { setSubtreeVisibility } from "molstar/lib/mol-plugin/behavior/static/state";
 import { Color } from "molstar/lib/mol-util/color";
-import { PluginCommands } from "molstar/lib/mol-plugin/commands";
 import { createVolumeRepresentationParams } from "molstar/lib/mol-plugin-state/helpers/volume-representation-params";
 import { Volume } from "molstar/lib/mol-model/volume";
 
@@ -60,7 +60,9 @@ export const COLOR_PALETTE = [
   // Row 6: Purples/Grays
   0x4a148c, 0x6a1b9a, 0x7b1fa2, 0x8e24aa, 0x9c27b0, 0xab47bc,
 ];
+// Add to imports at the top
 
+// Add a helper method to the class
 export class AlignmentViewer {
   plugin: PluginContext | null = null;
 
@@ -84,6 +86,20 @@ export class AlignmentViewer {
     PluginCommands.Canvas3D.SetSettings(this.plugin, {
       settings: { renderer: { ...renderer, backgroundColor: Color(0xffffff) } },
     });
+  }
+
+  private showToast(message: string, timeoutMs = 5000): void {
+    if (!this.plugin) return;
+    PluginCommands.Toast.Show(this.plugin, {
+      title: "Progress",
+      message,
+      timeoutMs,
+    });
+  }
+
+  private hideToast(): void {
+    if (!this.plugin) return;
+    PluginCommands.Toast.Hide(this.plugin, { key: "progress" });
   }
 
   onChange(callback: () => void): () => void {
@@ -132,7 +148,7 @@ export class AlignmentViewer {
   }
 
   async loadStructure(pdbId: string): Promise<LoadedStructure> {
-    if (!this.plugin) throw new Error("Viewer not initialized");
+    if (!this.plugin) throw new Error('Viewer not initialized');
 
     const structureId = pdbId.toUpperCase();
     const sources = this.getStructureSources(pdbId);
@@ -142,70 +158,69 @@ export class AlignmentViewer {
 
     for (const source of sources) {
       try {
+        this.showToast(`Downloading ${structureId} (${source.label})...`, 30000);
+
         const data = await this.plugin.builders.data.download({
           url: source.url,
-          isBinary: source.isBinary,
+          isBinary: source.isBinary
         });
 
-        const trajectory = await this.plugin.builders.structure.parseTrajectory(
-          data,
-          source.format
-        );
-        const model = await this.plugin.builders.structure.createModel(
-          trajectory
-        );
-        const structureSelector =
-          await this.plugin.builders.structure.createStructure(model);
+        this.showToast(`Parsing ${structureId}...`, 30000);
+
+        const trajectory = await this.plugin.builders.structure.parseTrajectory(data, source.format);
+        const model = await this.plugin.builders.structure.createModel(trajectory);
+        const structureSelector = await this.plugin.builders.structure.createStructure(model);
 
         const structure = structureSelector.data;
-        if (!structure) throw new Error("Structure data is null");
+        if (!structure) throw new Error('Structure data is null');
 
         // Handle alignment
         const isReference = !this.referenceStructure;
-        if (isReference) {
-          this.referenceStructure = structure;
-          this.referenceStructureId = structureId;
-          this.structureTransforms.set(structureId, Mat4.identity());
-        } else {
-          const transform = this.computeAlignmentTransform(
-            this.referenceStructure!,
-            structure
-          );
+        if (!isReference) {
+          this.showToast(`Aligning ${structureId} to reference...`, 30000);
+          const transform = this.computeAlignmentTransform(this.referenceStructure!, structure);
           if (transform) {
             await this.applyStructureTransform(structureSelector, transform);
             this.structureTransforms.set(structureId, transform);
           } else {
             this.structureTransforms.set(structureId, Mat4.identity());
           }
+        } else {
+          this.referenceStructure = structure;
+          this.referenceStructureId = structureId;
+          this.structureTransforms.set(structureId, Mat4.identity());
         }
 
-        // Create representation with uniform color directly (not using preset)
-        const reprRefs = await this.createStructureRepresentation(
-          structureSelector,
-          assignedColor
-        );
+        this.showToast(`Creating representation...`, 30000);
+
+        const reprRefs = await this.createStructureRepresentation(structureSelector, assignedColor);
 
         const item: LoadedStructure = {
-          type: "structure",
+          type: 'structure',
           id: structureId,
           ref: structureSelector.ref,
           representationRefs: reprRefs,
           visible: true,
           color: assignedColor,
           format: source.label,
-          isReference,
+          isReference
         };
 
         this.loadedItems.set(structureId, item);
         this.notifyChange();
 
+        this.showToast(`${structureId} loaded`, 2000);
+
         return item;
+
       } catch (e) {
         lastError = e as Error;
+        console.warn(`Failed ${source.label}: ${lastError.message}`);
         continue;
       }
     }
 
+    this.showToast(`Failed to load ${structureId}`, 5000);
     throw new Error(`Failed to load structure ${pdbId}: ${lastError?.message}`);
   }
 
@@ -240,8 +255,8 @@ export class AlignmentViewer {
 
   async loadEmdbMap(
     emdbId: string,
-    options: { detail?: number; isoValue?: number } = {}
-): Promise<LoadedMap> {
+    options: { isoValue?: number } = {}
+  ): Promise<LoadedMap> {
     if (!this.plugin) throw new Error('Viewer not initialized');
 
     const { isoValue = 1.5 } = options;
@@ -250,33 +265,39 @@ export class AlignmentViewer {
     const itemId = `EMD-${cleanId}`;
     const assignedColor = this.getNextColor();
 
-    // Download from EMDB FTP (full resolution, gzipped CCP4)
     const url = `https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-${numericId}/map/emd_${numericId}.map.gz`;
 
-    const data = await this.plugin.build()
+    try {
+      this.showToast(`Downloading ${itemId} (this may take a while)...`, 120000);
+
+      const data = await this.plugin.build()
         .toRoot()
         .apply(StateTransforms.Data.Download, { url, isBinary: true, label: itemId }, { state: { isGhost: true } })
         .apply(StateTransforms.Data.DeflateData)
         .commit();
 
-    const parsed = await this.plugin.dataFormats.get('ccp4')!.parse(this.plugin, data, { entryId: itemId });
-    const volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+      this.showToast(`Parsing ${itemId}...`, 60000);
 
-    if (!volume?.isOk) throw new Error('Failed to parse volume');
+      const parsed = await this.plugin.dataFormats.get('ccp4')!.parse(this.plugin, data, { entryId: itemId });
+      const volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
 
-    const repr = await this.plugin.build()
+      if (!volume?.isOk) throw new Error('Failed to parse volume');
+
+      this.showToast(`Creating isosurface...`, 30000);
+
+      const repr = await this.plugin.build()
         .to(volume)
         .apply(StateTransforms.Representation.VolumeRepresentation3D,
-            createVolumeRepresentationParams(this.plugin, volume.data!, {
-                type: 'isosurface',
-                typeParams: { alpha: 0.4, isoValue: Volume.IsoValue.relative(isoValue) },
-                color: 'uniform',
-                colorParams: { value: Color(assignedColor) }
-            })
+          createVolumeRepresentationParams(this.plugin, volume.data!, {
+            type: 'isosurface',
+            typeParams: { alpha: 0.4, isoValue: Volume.IsoValue.relative(isoValue) },
+            color: 'uniform',
+            colorParams: { value: Color(assignedColor) }
+          })
         )
         .commit();
 
-    const item: LoadedMap = {
+      const item: LoadedMap = {
         type: 'map',
         id: itemId,
         volumeRef: volume.ref,
@@ -284,13 +305,20 @@ export class AlignmentViewer {
         visible: true,
         color: assignedColor,
         emdbId: cleanId
-    };
+      };
 
-    this.loadedItems.set(itemId, item);
-    this.notifyChange();
+      this.loadedItems.set(itemId, item);
+      this.notifyChange();
 
-    return item;
-}
+      this.showToast(`${itemId} loaded`, 2000);
+
+      return item;
+
+    } catch (e) {
+      this.showToast(`Failed to load ${itemId}`, 5000);
+      throw e;
+    }
+  }
 
   private getVolumeRefs(): string[] {
     if (!this.plugin) return [];
