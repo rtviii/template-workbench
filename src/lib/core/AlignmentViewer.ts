@@ -22,8 +22,6 @@ import {
     relativeToAbsolute,
 } from './representations';
 import { STYLIZED_POSTPROCESSING } from './postprocessing';
-// Add this type near the top of the file
-
 
 export class AlignmentViewer {
     plugin: PluginContext | null = null;
@@ -55,7 +53,6 @@ export class AlignmentViewer {
         });
     }
 
-
     onChange(callback: () => void): () => void {
         this.onChangeCallbacks.add(callback);
         return () => this.onChangeCallbacks.delete(callback);
@@ -79,18 +76,53 @@ export class AlignmentViewer {
         return color;
     }
 
+    private async _processStructure(structureSelector: StateObjectSelector<SO.Molecule.Structure>, structureId: string, formatLabel: string): Promise<LoadedStructure> {
+        const structure = structureSelector.data;
+        if (!structure) throw new Error('Structure data is null');
+
+        const isReference = !this.referenceStructure;
+        if (!isReference) {
+            const transform = this.computeAlignmentTransform(this.referenceStructure!, structure);
+            if (transform) {
+                await this.applyStructureTransform(structureSelector, transform);
+                this.structureTransforms.set(structureId, transform);
+            } else {
+                this.structureTransforms.set(structureId, Mat4.identity());
+            }
+        } else {
+            this.referenceStructure = structure;
+            this.referenceStructureId = structureId;
+            this.structureTransforms.set(structureId, Mat4.identity());
+        }
+
+        const assignedColor = this.getNextColor();
+        const reprRefs = await createStructureRepresentation(this.plugin!, structureSelector, assignedColor);
+
+        const item: LoadedStructure = {
+            type: 'structure',
+            id: structureId,
+            ref: structureSelector.ref,
+            representationRefs: reprRefs,
+            visible: true,
+            color: assignedColor,
+            format: formatLabel,
+            isReference,
+        };
+
+        this.loadedItems.set(structureId, item);
+        this.notifyChange();
+        return item;
+    }
+
     async loadStructure(pdbId: string): Promise<LoadedStructure> {
         if (!this.plugin) throw new Error('Viewer not initialized');
 
         const structureId = pdbId.toUpperCase();
         const sources = getStructureSources(pdbId);
-        const assignedColor = this.getNextColor();
-
         let lastError: Error | null = null;
 
         for (const source of sources) {
             try {
-                // Builders handle task system internally - call directly
                 const data = await this.plugin.builders.data.download({
                     url: source.url,
                     isBinary: source.isBinary,
@@ -100,41 +132,7 @@ export class AlignmentViewer {
                 const model = await this.plugin.builders.structure.createModel(trajectory);
                 const structureSelector = await this.plugin.builders.structure.createStructure(model);
 
-                const structure = structureSelector.data;
-                if (!structure) throw new Error('Structure data is null');
-
-                const isReference = !this.referenceStructure;
-                if (!isReference) {
-                    const transform = this.computeAlignmentTransform(this.referenceStructure!, structure);
-                    if (transform) {
-                        await this.applyStructureTransform(structureSelector, transform);
-                        this.structureTransforms.set(structureId, transform);
-                    } else {
-                        this.structureTransforms.set(structureId, Mat4.identity());
-                    }
-                } else {
-                    this.referenceStructure = structure;
-                    this.referenceStructureId = structureId;
-                    this.structureTransforms.set(structureId, Mat4.identity());
-                }
-
-                const reprRefs = await createStructureRepresentation(this.plugin, structureSelector, assignedColor);
-
-                const item: LoadedStructure = {
-                    type: 'structure',
-                    id: structureId,
-                    ref: structureSelector.ref,
-                    representationRefs: reprRefs,
-                    visible: true,
-                    color: assignedColor,
-                    format: source.label,
-                    isReference,
-                };
-
-                this.loadedItems.set(structureId, item);
-                this.notifyChange();
-
-                return item;
+                return await this._processStructure(structureSelector, structureId, source.label);
             } catch (e) {
                 lastError = e as Error;
                 console.warn(`Failed ${source.label}: ${lastError.message}`);
@@ -145,23 +143,36 @@ export class AlignmentViewer {
         throw new Error(`Failed to load structure ${pdbId}: ${lastError?.message}`);
     }
 
-    async loadEmdbMap(emdbId: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
+    async loadStructureFromUrl(url: string, format: 'pdb' | 'mmcif'): Promise<LoadedStructure> {
         if (!this.plugin) throw new Error('Viewer not initialized');
+        const structureId = url.split('/').pop()?.split('?')[0] || 'local_structure';
 
-        const { isoValue = 1.5 } = options;
+        const data = await this.plugin.builders.data.download({ url, isBinary: false });
+        const trajectory = await this.plugin.builders.structure.parseTrajectory(data, format);
+        const model = await this.plugin.builders.structure.createModel(trajectory);
+        const structureSelector = await this.plugin.builders.structure.createStructure(model);
+
+        return await this._processStructure(structureSelector, structureId, format);
+    }
+
+    async loadEmdbMap(emdbId: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
         const cleanId = emdbId.toUpperCase().replace('EMD-', '');
         const numericId = parseInt(cleanId);
-        const itemId = `EMD-${cleanId}`;
+        const url = `https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-${numericId}/map/emd_${numericId}.map.gz`;
+        return this.loadVolumeFromUrl(url, `EMD-${cleanId}`, options);
+    }
+
+    async loadVolumeFromUrl(url: string, label?: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
+        if (!this.plugin) throw new Error('Viewer not initialized');
+        const { isoValue = 1.5 } = options;
+        const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
         const assignedColor = this.getNextColor();
 
-        const url = `https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-${numericId}/map/emd_${numericId}.map.gz`;
-
         try {
-            const data = await this.plugin
-                .build()
+            const data = await this.plugin.build()
                 .toRoot()
                 .apply(StateTransforms.Data.Download, { url, isBinary: true, label: itemId }, { state: { isGhost: true } })
-                .apply(StateTransforms.Data.DeflateData)
+                .apply(url.endsWith('.gz') ? StateTransforms.Data.DeflateData : StateTransforms.Data.Passthrough)
                 .commit();
 
             const parsed = await this.plugin.dataFormats.get('ccp4')!.parse(this.plugin, data, { entryId: itemId });
@@ -181,7 +192,7 @@ export class AlignmentViewer {
                 representationRef: reprRef,
                 visible: true,
                 color: assignedColor,
-                emdbId: cleanId,
+                emdbId: itemId,
                 isoValue,
                 stats,
             };

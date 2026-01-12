@@ -4,6 +4,8 @@ import type { LoadedItem } from '../lib';
 export type BridgeCommand =
   | { action: 'loadStructure'; pdbId: string }
   | { action: 'loadEmdbMap'; emdbId: string; isoValue?: number }
+  | { action: 'load_structure'; url: string; format: 'pdb' | 'mmcif' }
+  | { action: 'load_volume'; url: string }
   | { action: 'setVisibility'; itemId: string; visible: boolean }
   | { action: 'setColor'; itemId: string; color: number }
   | { action: 'setIsoValue'; itemId: string; isoValue: number }
@@ -42,6 +44,16 @@ export async function initBridge(container: HTMLElement): Promise<AlignmentViewe
         }
         case 'loadEmdbMap': {
           const item = await viewer.loadEmdbMap(cmd.emdbId, { isoValue: cmd.isoValue });
+          emit({ type: 'mapLoaded', item });
+          break;
+        }
+        case 'load_structure': {
+          const item = await viewer.loadStructureFromUrl(cmd.url, cmd.format);
+          emit({ type: 'structureLoaded', item });
+          break;
+        }
+        case 'load_volume': {
+          const item = await viewer.loadVolumeFromUrl(cmd.url);
           emit({ type: 'mapLoaded', item });
           break;
         }
