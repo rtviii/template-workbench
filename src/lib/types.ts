@@ -24,8 +24,9 @@ export interface LoadedMap {
   visible: boolean;
   color: number;
   emdbId: string;
-  isoValue: number;        // relative (sigma)
+  isoValue: number;        // actual ISO used (can be negative)
   stats: VolumeStats;
+  isInverted?: boolean;    // ADD THIS
 }
 
 export type LoadedItem = LoadedStructure | LoadedMap;

@@ -36,6 +36,11 @@ export class AlignmentViewer {
     private onChangeCallbacks: Set<() => void> = new Set();
     private colorIndex = 0;
 
+    private referenceVolume: StateObjectSelector<SO.Volume.Data> | null = null;  // CHANGE: store selector
+    private referenceVolumeRef: string | null = null;
+    private referenceVolumeId: string | null = null;  // ADD THIS
+    private referenceType: 'structure' | 'volume' | null = null;  // ADD THIS
+
     async init(container: HTMLElement): Promise<void> {
         const canvas = document.createElement('canvas');
         container.appendChild(canvas);
@@ -46,7 +51,7 @@ export class AlignmentViewer {
         await this.plugin.init();
         this.plugin.initViewer(canvas, container);
 
-        const renderer       = this.plugin.canvas3d?.props.renderer;
+        const renderer = this.plugin.canvas3d?.props.renderer;
         const postprocessing = this.plugin.canvas3d?.props.postprocessing;
 
         PluginCommands.Canvas3D.SetSettings(this.plugin, {
@@ -55,6 +60,37 @@ export class AlignmentViewer {
                 postprocessing: { ...postprocessing, ...STYLIZED_POSTPROCESSING },
             },
         });
+    }
+    private async centerStructureOnVolume(structureSelector: StateObjectSelector<SO.Molecule.Structure>, volumeObj: SO.Volume.Data): Promise<void> {
+        if (!this.plugin) return;
+
+        try {
+            const structure = structureSelector.data;
+            if (!structure) return;
+
+            // Get volume center
+            const gridToCartesian = Grid.getGridToCartesianTransform(volumeObj.grid);
+            const gridCenter = Vec3.create(
+                (volumeObj.grid.cells.space.dimensions[0] - 1) / 2,
+                (volumeObj.grid.cells.space.dimensions[1] - 1) / 2,
+                (volumeObj.grid.cells.space.dimensions[2] - 1) / 2
+            );
+            const volumeCenter = Vec3.transformMat4(Vec3(), gridCenter, gridToCartesian);
+
+            // Get structure center
+            const structCenter = structure.boundary.sphere.center;
+
+            // Calculate translation
+            const translation = Vec3.sub(Vec3(), volumeCenter, structCenter);
+            const translationMatrix = Mat4.identity();
+            Mat4.setTranslation(translationMatrix, translation);
+
+
+            await this.applyStructureTransform(structureSelector, translationMatrix);
+
+        } catch (e) {
+            console.warn("[VIEWER] Could not center structure on volume:", e);
+        }
     }
 
     onChange(callback: () => void): () => void {
@@ -80,22 +116,40 @@ export class AlignmentViewer {
         return color;
     }
 
+
+
     private async _processStructure(structureSelector: StateObjectSelector<SO.Molecule.Structure>, structureId: string, formatLabel: string): Promise<LoadedStructure> {
         const structure = structureSelector.data;
         if (!structure) throw new Error('Structure data is null');
 
-        const isReference = !this.referenceStructure;
+
+        // Check if we have any reference at all
+        const isReference = !this.referenceStructure && !this.referenceVolume;
+
         if (!isReference) {
-            const transform = this.computeAlignmentTransform(this.referenceStructure!, structure);
-            if (transform) {
-                await this.applyStructureTransform(structureSelector, transform);
-                this.structureTransforms.set(structureId, transform);
-            } else {
-                this.structureTransforms.set(structureId, Mat4.identity());
+            // Align to existing reference
+            if (this.referenceStructure) {
+                const transform = this.computeAlignmentTransform(this.referenceStructure, structure);
+                if (transform) {
+                    await this.applyStructureTransform(structureSelector, transform);
+                    this.structureTransforms.set(structureId, transform);
+                } else {
+                    this.structureTransforms.set(structureId, Mat4.identity());
+                }
+            } else if (this.referenceVolume) {  // CHANGE: check for selector
+                // Get fresh volume data from selector
+                const volumeObj = this.referenceVolume.data;  // CHANGE: use .data
+                if (volumeObj) {
+                    await this.centerStructureOnVolume(structureSelector, volumeObj);
+                } else {
+                    console.warn("[VIEWER] Could not get reference volume data");
+                }
             }
         } else {
+            // This is the first item - set as reference
             this.referenceStructure = structure;
             this.referenceStructureId = structureId;
+            this.referenceType = 'structure';
             this.structureTransforms.set(structureId, Mat4.identity());
         }
 
@@ -117,207 +171,208 @@ export class AlignmentViewer {
         this.notifyChange();
         return item;
     }
-// Update the loadLocalVolume method in AlignmentViewer.ts
-async loadLocalVolume(url: string, label?: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
-  if (!this.plugin) throw new Error('Viewer not initialized');
-  
-  const { isoValue = 1.5 } = options;
-  const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
-  const assignedColor = this.getNextColor();
 
-  try {
-    console.log("[VIEWER] Loading local volume:", url);
-    
-    const data = await this.plugin.build()
-      .toRoot()
-      .apply(StateTransforms.Data.Download, { 
-        url, 
-        isBinary: true, 
-        label: itemId 
-      }, { state: { isGhost: true } })
-      .commit();
-    
-    if (!data.isOk) {
-      throw new Error(`Download failed`);
+
+    // Update the loadLocalVolume method in AlignmentViewer.ts
+    async loadLocalVolume(url: string, label?: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
+        if (!this.plugin) throw new Error('Viewer not initialized');
+
+        const { isoValue = 1.5 } = options;
+        const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
+        const assignedColor = this.getNextColor();
+
+        try {
+
+            const data = await this.plugin.build()
+                .toRoot()
+                .apply(StateTransforms.Data.Download, {
+                    url,
+                    isBinary: true,
+                    label: itemId
+                }, { state: { isGhost: true } })
+                .commit();
+
+            if (!data.isOk) {
+                throw new Error(`Download failed`);
+            }
+
+            const ccp4Format = this.plugin.dataFormats.get('ccp4');
+            if (!ccp4Format) {
+                throw new Error('CCP4 format parser not available');
+            }
+
+            const parsed = await ccp4Format.parse(this.plugin, data, { entryId: itemId });
+            let volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+
+            if (!volume?.isOk) {
+                throw new Error('Failed to parse volume');
+            }
+
+            const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
+            const stats = getVolumeStats(volumeObj);
+
+            // AUTO-DETECT if this is a "black" (inverted) template
+            const isInverted = stats.max < Math.abs(stats.min) * 0.5;
+            let actualIsoValue = isoValue;
+
+            if (isInverted) {
+                actualIsoValue = -Math.abs(isoValue);
+            }
+
+            // Set as reference if first item (BEFORE any transformation)
+            const isFirstItem = !this.referenceStructure && !this.referenceVolume;
+
+            if (this.referenceStructure) {
+                // Align to reference structure
+                volume = await this.centerVolumeOnReference(volume);  // This changes the ref!
+            }
+
+            // Store reference AFTER transformation
+            if (isFirstItem) {
+                this.referenceVolume = volume;  // CHANGE: store selector
+                this.referenceVolumeId = itemId;
+                this.referenceType = 'volume';
+            }
+
+            const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, actualIsoValue);
+
+            const item: LoadedMap = {
+                type: 'map',
+                id: itemId,
+                volumeRef: volume.ref,
+                representationRef: reprRef,
+                visible: true,
+                color: assignedColor,
+                emdbId: itemId,
+                isoValue: actualIsoValue,
+                stats,
+                isInverted,
+            };
+
+            this.loadedItems.set(itemId, item);
+            this.notifyChange();
+
+            return item;
+        } catch (e) {
+            console.error("[VIEWER] Error loading local volume:", e);
+            throw e;
+        }
     }
-
-    const ccp4Format = this.plugin.dataFormats.get('ccp4');
-    if (!ccp4Format) {
-      throw new Error('CCP4 format parser not available');
-    }
-    
-    const parsed = await ccp4Format.parse(this.plugin, data, { entryId: itemId });
-    let volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
-
-    if (!volume?.isOk) {
-      throw new Error('Failed to parse volume');
-    }
-
-    // If we have a reference structure, center the volume on it
-    if (this.referenceStructure && this.referenceStructureId) {
-      console.log("[VIEWER] Centering volume on reference structure");
-      volume = await this.centerVolumeOnReference(volume);
-    }
-
-    const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
-    const stats = getVolumeStats(volumeObj);
-
-    const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
-
-    const item: LoadedMap = {
-      type: 'map',
-      id: itemId,
-      volumeRef: volume.ref,
-      representationRef: reprRef,
-      visible: true,
-      color: assignedColor,
-      emdbId: itemId,
-      isoValue,
-      stats,
-    };
-
-    this.loadedItems.set(itemId, item);
-    this.notifyChange();
-    
-    console.log("[VIEWER] Volume loaded and aligned successfully");
-    return item;
-  } catch (e) {
-    console.error("[VIEWER] Error loading local volume:", e);
-    throw e;
-  }
-}
 
     private async centerVolumeOnReference(volumeSelector: StateObjectSelector<SO.Volume.Data>): Promise<StateObjectSelector<SO.Volume.Data>> {
-    if (!this.plugin || !this.referenceStructure) {
-        console.log("[VIEWER] No plugin or reference structure, skipping alignment");
-        return volumeSelector;
-    }
-    
-    try {
-        console.log("[VIEWER] ===== Starting volume alignment =====");
-        
-        // Get reference structure's center
-        const structCenter = this.referenceStructure.boundary.sphere.center;
-        console.log("[VIEWER] Reference structure center:", structCenter);
-        
-        // Get volume's world center using proper grid transform
-        const volumeObj = volumeSelector.data;
-        if (!volumeObj) {
-            console.log("[VIEWER] No volume data!");
+        if (!this.plugin || !this.referenceStructure) {
             return volumeSelector;
         }
-        
-        // Use Grid.getGridToCartesianTransform to handle spacegroup transforms properly
-        const gridToCartesian = Grid.getGridToCartesianTransform(volumeObj.grid);
-        console.log("[VIEWER] Grid to Cartesian transform obtained");
-        
-        // Calculate grid center in voxel coordinates
-        const gridCenter = Vec3.create(
-            (volumeObj.grid.cells.space.dimensions[0] - 1) / 2,
-            (volumeObj.grid.cells.space.dimensions[1] - 1) / 2,
-            (volumeObj.grid.cells.space.dimensions[2] - 1) / 2
-        );
-        console.log("[VIEWER] Grid center (voxels):", gridCenter);
-        
-        // Transform to world coordinates
-        const volumeCenter = Vec3.transformMat4(Vec3(), gridCenter, gridToCartesian);
-        console.log("[VIEWER] Volume center (world):", volumeCenter);
-        
-        // Calculate translation
-        const translation = Vec3.sub(Vec3(), structCenter, volumeCenter);
-        console.log("[VIEWER] Translation needed:", translation);
-        
-        // Check if translation is significant
-        const translationMagnitude = Vec3.magnitude(translation);
-        console.log("[VIEWER] Translation magnitude:", translationMagnitude);
-        
-        if (translationMagnitude < 0.1) {
-            console.log("[VIEWER] Already aligned, skipping");
-            return volumeSelector;
-        }
-        
-        // Create transformation matrix
-        const matrix = Mat4.identity();
-        Mat4.setTranslation(matrix, translation);
-        console.log("[VIEWER] Transform matrix created");
-        
-        // Apply volume-specific transform (NOT Model.TransformData!)
-        console.log("[VIEWER] Applying VolumeTransform...");
-        
-        const transformed = await this.plugin.build()
-            .to(volumeSelector)
-            .apply(StateTransforms.Volume.VolumeTransform, {
-                transform: { 
-                    name: 'matrix' as const, 
-                    params: { data: matrix, transpose: false } 
-                },
-            })
-            .commit();
-        
-        console.log("[VIEWER] Transform applied, result isOk:", transformed.isOk);
-        console.log("[VIEWER] ===== Volume alignment complete =====");
-        
-        return transformed;
-        
-    } catch (e) {
-        console.error("[VIEWER] ERROR during volume alignment:", e);
-        console.error("[VIEWER] Error stack:", e instanceof Error ? e.stack : "no stack");
-        return volumeSelector;
-    }
-}
 
-private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volume.Data>): Promise<void> {
-  if (!this.plugin || !this.referenceStructure) return;
-  
-  try {
-    // Get structure center
-    const structureObj = this.plugin.state.data.select(
-      StateSelection.Generators.byRef(this.referenceStructureId!)
-    )[0]?.obj as SO.Molecule.Structure | undefined;
-    
-    if (!structureObj) return;
-    
-    const structureData = structureObj.data;
-    const boundary = structureData.boundary;
-    const structureCenter = boundary.sphere.center;
-    
-    console.log("[VIEWER] Structure center:", structureCenter);
-    
-    // Get volume data
-    const volumeObj = volumeSelector.data;
-    if (!volumeObj) return;
-    
-    const grid = volumeObj.grid;
-    const volumeCenter = [
-      (grid.cells.space.dimensions[0] / 2) * grid.cells.space.size[0],
-      (grid.cells.space.dimensions[1] / 2) * grid.cells.space.size[1],
-      (grid.cells.space.dimensions[2] / 2) * grid.cells.space.size[2],
-    ];
-    
-    console.log("[VIEWER] Volume center:", volumeCenter);
-    
-    // Calculate translation to align centers
-    const translation = Mat4.identity();
-    Mat4.setTranslation(translation, [
-      structureCenter[0] - volumeCenter[0],
-      structureCenter[1] - volumeCenter[1],
-      structureCenter[2] - volumeCenter[2],
-    ]);
-    
-    console.log("[VIEWER] Applying translation to volume");
-    
-    // Apply transform
-    await this.plugin.build()
-      .to(volumeSelector)
-      .apply(StateTransforms.Model.TransformData, {
-        transform: { name: 'matrix' as const, params: { data: translation, transpose: false } },
-      })
-      .commit();
-      
-  } catch (e) {
-    console.warn("[VIEWER] Could not align volume to structure:", e);
-  }
-}
+        try {
+
+            // Get reference structure's center
+            const structCenter = this.referenceStructure.boundary.sphere.center;
+
+            // Get volume's world center using proper grid transform
+            const volumeObj = volumeSelector.data;
+            if (!volumeObj) {
+                return volumeSelector;
+            }
+
+            // Use Grid.getGridToCartesianTransform to handle spacegroup transforms properly
+            const gridToCartesian = Grid.getGridToCartesianTransform(volumeObj.grid);
+
+            // Calculate grid center in voxel coordinates
+            const gridCenter = Vec3.create(
+                (volumeObj.grid.cells.space.dimensions[0] - 1) / 2,
+                (volumeObj.grid.cells.space.dimensions[1] - 1) / 2,
+                (volumeObj.grid.cells.space.dimensions[2] - 1) / 2
+            );
+
+            // Transform to world coordinates
+            const volumeCenter = Vec3.transformMat4(Vec3(), gridCenter, gridToCartesian);
+
+            // Calculate translation
+            const translation = Vec3.sub(Vec3(), structCenter, volumeCenter);
+
+            // Check if translation is significant
+            const translationMagnitude = Vec3.magnitude(translation);
+
+            if (translationMagnitude < 0.1) {
+                return volumeSelector;
+            }
+
+            // Create transformation matrix
+            const matrix = Mat4.identity();
+            Mat4.setTranslation(matrix, translation);
+
+            // Apply volume-specific transform (NOT Model.TransformData!)
+
+            const transformed = await this.plugin.build()
+                .to(volumeSelector)
+                .apply(StateTransforms.Volume.VolumeTransform, {
+                    transform: {
+                        name: 'matrix' as const,
+                        params: { data: matrix, transpose: false }
+                    },
+                })
+                .commit();
+
+
+            return transformed;
+
+        } catch (e) {
+            console.error("[VIEWER] ERROR during volume alignment:", e);
+            console.error("[VIEWER] Error stack:", e instanceof Error ? e.stack : "no stack");
+            return volumeSelector;
+        }
+    }
+
+    private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volume.Data>): Promise<void> {
+        if (!this.plugin || !this.referenceStructure) return;
+
+        try {
+            // Get structure center
+            const structureObj = this.plugin.state.data.select(
+                StateSelection.Generators.byRef(this.referenceStructureId!)
+            )[0]?.obj as SO.Molecule.Structure | undefined;
+
+            if (!structureObj) return;
+
+            const structureData = structureObj.data;
+            const boundary = structureData.boundary;
+            const structureCenter = boundary.sphere.center;
+
+
+            // Get volume data
+            const volumeObj = volumeSelector.data;
+            if (!volumeObj) return;
+
+            const grid = volumeObj.grid;
+            const volumeCenter = [
+                (grid.cells.space.dimensions[0] / 2) * grid.cells.space.size[0],
+                (grid.cells.space.dimensions[1] / 2) * grid.cells.space.size[1],
+                (grid.cells.space.dimensions[2] / 2) * grid.cells.space.size[2],
+            ];
+
+
+            // Calculate translation to align centers
+            const translation = Mat4.identity();
+            Mat4.setTranslation(translation, [
+                structureCenter[0] - volumeCenter[0],
+                structureCenter[1] - volumeCenter[1],
+                structureCenter[2] - volumeCenter[2],
+            ]);
+
+
+            // Apply transform
+            await this.plugin.build()
+                .to(volumeSelector)
+                .apply(StateTransforms.Model.TransformData, {
+                    transform: { name: 'matrix' as const, params: { data: translation, transpose: false } },
+                })
+                .commit();
+
+        } catch (e) {
+            console.warn("[VIEWER] Could not align volume to structure:", e);
+        }
+    }
 
     async loadStructure(pdbId: string): Promise<LoadedStructure> {
         if (!this.plugin) throw new Error('Viewer not initialized');
@@ -368,91 +423,88 @@ private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volu
     }
 
     async loadVolumeFromUrl(url: string, label?: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
-  if (!this.plugin) throw new Error('Viewer not initialized');
-  const { isoValue = 1.5 } = options;
-  const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
+        if (!this.plugin) throw new Error('Viewer not initialized');
+        const { isoValue = 1.5 } = options;
+        const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
         const assignedColor = this.getNextColor();
 
-  try {
-    console.log("[VIEWER] loadVolumeFromUrl:", url);
-    
-    const isGzipped = url.endsWith('.gz');
-    
-    const data = await this.plugin.build()
-      .toRoot()
-      .apply(StateTransforms.Data.Download, { 
-        url, 
-        isBinary: true, 
-        label: itemId 
-      }, { state: { isGhost: true } })
-      .apply(isGzipped ? StateTransforms.Data.DeflateData : StateTransforms.Data.Passthrough)
-      .commit();
-
-    let parsed;
-    let volume;
-    
-    try {
-      const ccp4Format = this.plugin.dataFormats.get('ccp4');
-      if (ccp4Format) {
-        parsed = await ccp4Format.parse(this.plugin, data, { entryId: itemId });
-        volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
-      }
-    } catch (ccp4Error) {
-      console.log("[VIEWER] CCP4 parse failed, trying other formats:", ccp4Error);
-    }
-    
-    if (!volume || !volume.isOk) {
-      const volumeFormats = ['dscif', 'cube'];
-      for (const formatName of volumeFormats) {
         try {
-          const format = this.plugin.dataFormats.get(formatName);
-          if (format) {
-            parsed = await format.parse(this.plugin, data, { entryId: itemId });
-            volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
-            if (volume && volume.isOk) break;
-          }
+
+            const isGzipped = url.endsWith('.gz');
+
+            const data = await this.plugin.build()
+                .toRoot()
+                .apply(StateTransforms.Data.Download, {
+                    url,
+                    isBinary: true,
+                    label: itemId
+                }, { state: { isGhost: true } })
+                .apply(isGzipped ? StateTransforms.Data.DeflateData : StateTransforms.Data.Passthrough)
+                .commit();
+
+            let parsed;
+            let volume;
+
+            try {
+                const ccp4Format = this.plugin.dataFormats.get('ccp4');
+                if (ccp4Format) {
+                    parsed = await ccp4Format.parse(this.plugin, data, { entryId: itemId });
+                    volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+                }
+            } catch (ccp4Error) {
+            }
+
+            if (!volume || !volume.isOk) {
+                const volumeFormats = ['dscif', 'cube'];
+                for (const formatName of volumeFormats) {
+                    try {
+                        const format = this.plugin.dataFormats.get(formatName);
+                        if (format) {
+                            parsed = await format.parse(this.plugin, data, { entryId: itemId });
+                            volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+                            if (volume && volume.isOk) break;
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+            }
+
+            if (!volume?.isOk) {
+                throw new Error('Failed to parse volume with any available format');
+            }
+
+            // Center volume on reference if available
+            if (this.referenceStructure && this.referenceStructureId) {
+                volume = await this.centerVolumeOnReference(volume);
+            }
+
+            const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
+            const stats = getVolumeStats(volumeObj);
+
+            const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
+
+            const item: LoadedMap = {
+                type: 'map',
+                id: itemId,
+                volumeRef: volume.ref,
+                representationRef: reprRef,
+                visible: true,
+                color: assignedColor,
+                emdbId: itemId,
+                isoValue,
+                stats,
+            };
+
+            this.loadedItems.set(itemId, item);
+            this.notifyChange();
+
+            return item;
         } catch (e) {
-          continue;
+            console.error("[VIEWER] Error in loadVolumeFromUrl:", e);
+            throw e;
         }
-      }
     }
-    
-    if (!volume?.isOk) {
-      throw new Error('Failed to parse volume with any available format');
-    }
-
-    // Center volume on reference if available
-    if (this.referenceStructure && this.referenceStructureId) {
-      console.log("[VIEWER] Centering volume on reference structure");
-      volume = await this.centerVolumeOnReference(volume);
-    }
-
-    const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
-    const stats = getVolumeStats(volumeObj);
-
-    const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
-
-    const item: LoadedMap = {
-      type: 'map',
-      id: itemId,
-      volumeRef: volume.ref,
-      representationRef: reprRef,
-      visible: true,
-      color: assignedColor,
-      emdbId: itemId,
-      isoValue,
-      stats,
-    };
-
-    this.loadedItems.set(itemId, item);
-    this.notifyChange();
-
-    return item;
-  } catch (e) {
-    console.error("[VIEWER] Error in loadVolumeFromUrl:", e);
-    throw e;
-  }
-}
 
     async setItemVisibility(itemId: string, visible: boolean): Promise<void> {
         if (!this.plugin) return;
@@ -552,6 +604,9 @@ private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volu
 
         this.referenceStructure = null;
         this.referenceStructureId = null;
+        this.referenceVolume = null;  // CHANGE
+        this.referenceVolumeId = null;
+        this.referenceType = null;
         this.structureTransforms.clear();
         this.loadedItems.clear();
         this.colorIndex = 0;
