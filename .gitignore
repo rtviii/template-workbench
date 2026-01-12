@@ -1,0 +1,7 @@
+node_modules
+dist
+**/*.map
+*.map
+.DS_Store
+q_*.md
+**/q_*.md

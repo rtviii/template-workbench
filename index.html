@@ -1,0 +1,321 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Molstar Alignment Test</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            height: 100vh;
+        }
+        
+        #controls {
+            width: 320px;
+            padding: 16px;
+            background: #f5f5f5;
+            border-right: 1px solid #ddd;
+            overflow-y: auto;
+        }
+        
+        #viewer-container {
+            flex: 1;
+            position: relative;
+        }
+        
+        h3 {
+            margin: 16px 0 8px 0;
+            font-size: 14px;
+            color: #333;
+        }
+        
+        h3:first-child { margin-top: 0; }
+        
+        .input-group {
+            margin-bottom: 12px;
+        }
+        
+        label {
+            display: block;
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 4px;
+        }
+        
+        input[type="text"], input[type="number"], select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        
+        button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 8px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        button.primary {
+            background: #2563eb;
+            color: white;
+        }
+        
+        button.primary:hover { background: #1d4ed8; }
+        
+        button.secondary {
+            background: #e5e7eb;
+            color: #374151;
+        }
+        
+        button.secondary:hover { background: #d1d5db; }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        #log {
+            margin-top: 16px;
+            padding: 8px;
+            background: #1e1e1e;
+            color: #0f0;
+            font-family: monospace;
+            font-size: 11px;
+            height: 150px;
+            overflow-y: auto;
+            border-radius: 4px;
+        }
+        
+        #log .error { color: #f87171; }
+        #log .info { color: #60a5fa; }
+        
+        .loaded-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 8px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 4px;
+            font-size: 12px;
+        }
+        
+        .loaded-item .id { font-weight: 600; }
+        .loaded-item .type { color: #666; font-size: 11px; }
+        .loaded-item .ref-badge {
+            background: #fef3c7;
+            color: #92400e;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+        }
+        
+        .emdb-suggestion {
+            font-size: 11px;
+            color: #059669;
+            margin-top: 4px;
+            cursor: pointer;
+        }
+        
+        .emdb-suggestion:hover {
+            text-decoration: underline;
+        }
+        
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 16px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h3>Load Structure</h3>
+        <div class="input-group">
+            <label>PDB ID</label>
+            <input type="text" id="pdb-input" placeholder="e.g. 3J7Z" value="3J7Z">
+        </div>
+        <button class="primary" id="load-structure-btn">Load Structure</button>
+        
+        <h3>Load Density Map</h3>
+        <div class="input-group">
+            <label>EMDB ID</label>
+            <input type="text" id="emdb-input" placeholder="e.g. 6057 or EMD-6057">
+            <div id="emdb-suggestion" class="emdb-suggestion"></div>
+        </div>
+        <div class="input-group">
+            <label>Detail Level (0-6)</label>
+            <input type="number" id="detail-level" value="3" min="0" max="6" step="1">
+        </div>
+        <div class="input-group">
+            <label>Server</label>
+            <select id="emdb-server">
+                <option value="pdbe">PDBe</option>
+                <option value="rcsb">RCSB</option>
+            </select>
+        </div>
+        <button class="primary" id="load-map-btn" disabled>Load Map</button>
+        
+        <hr>
+        
+        <h3>Loaded Items</h3>
+        <div id="loaded-items"></div>
+        
+        <button class="secondary" id="clear-btn" style="margin-top: 12px;">Clear All</button>
+        
+        <h3>Log</h3>
+        <div id="log"></div>
+    </div>
+    
+    <div id="viewer-container"></div>
+
+    <script type="module">
+        import { createAlignmentViewer, fetchEmdbIds } from './dist/molstar-lib.js';
+        
+        let viewer = null;
+        const loadedItems = [];
+        
+        const pdbInput = document.getElementById('pdb-input');
+        const loadStructureBtn = document.getElementById('load-structure-btn');
+        
+        const emdbInput = document.getElementById('emdb-input');
+        const emdbSuggestion = document.getElementById('emdb-suggestion');
+        const detailLevel = document.getElementById('detail-level');
+        const emdbServer = document.getElementById('emdb-server');
+        const loadMapBtn = document.getElementById('load-map-btn');
+        
+        const clearBtn = document.getElementById('clear-btn');
+        const loadedItemsContainer = document.getElementById('loaded-items');
+        const logContainer = document.getElementById('log');
+        
+        function log(msg, type = '') {
+            const line = document.createElement('div');
+            line.className = type;
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logContainer.appendChild(line);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+        
+        function updateLoadedItems() {
+            loadedItemsContainer.innerHTML = loadedItems.map(item => `
+                <div class="loaded-item">
+                    <div>
+                        <span class="id">${item.id}</span>
+                        <span class="type">${item.type}${item.format ? ` (${item.format})` : ''}</span>
+                    </div>
+                    ${item.isReference ? '<span class="ref-badge">REF</span>' : ''}
+                </div>
+            `).join('');
+        }
+        
+        async function init() {
+            try {
+                log('Initializing viewer...', 'info');
+                viewer = await createAlignmentViewer(document.getElementById('viewer-container'));
+                log('Viewer ready');
+                loadMapBtn.disabled = false;
+            } catch (e) {
+                log(`Init failed: ${e.message}`, 'error');
+                console.error(e);
+            }
+        }
+        
+        loadStructureBtn.addEventListener('click', async () => {
+            const pdbId = pdbInput.value.trim().toUpperCase();
+            
+            if (!pdbId) {
+                log('Enter a PDB ID', 'error');
+                return;
+            }
+            
+            loadStructureBtn.disabled = true;
+            loadStructureBtn.textContent = 'Loading...';
+            
+            try {
+                log(`Loading structure ${pdbId}...`, 'info');
+                const { format } = await viewer.loadStructure(pdbId);
+                
+                const isReference = loadedItems.filter(i => i.type === 'structure').length === 0;
+                loadedItems.push({ id: pdbId, type: 'structure', format, isReference });
+                updateLoadedItems();
+                
+                log(`Structure ${pdbId} loaded via ${format} (reference: ${isReference})`);
+                
+                // Fetch and suggest EMDB IDs
+                emdbSuggestion.textContent = '';
+                const emdbIds = await fetchEmdbIds(pdbId);
+                if (emdbIds.length > 0) {
+                    const firstId = emdbIds[0].replace('EMD-', '');
+                    emdbSuggestion.textContent = `Suggested: ${emdbIds.join(', ')}`;
+                    emdbSuggestion.onclick = () => {
+                        emdbInput.value = firstId;
+                    };
+                    emdbInput.value = firstId;
+                }
+                
+            } catch (e) {
+                log(`Failed to load structure: ${e.message}`, 'error');
+                console.error(e);
+            } finally {
+                loadStructureBtn.disabled = false;
+                loadStructureBtn.textContent = 'Load Structure';
+            }
+        });
+        
+        loadMapBtn.addEventListener('click', async () => {
+            const emdbId = emdbInput.value.trim();
+            const detail = parseInt(detailLevel.value) || 3;
+            const server = emdbServer.value;
+            
+            if (!emdbId) {
+                log('Enter an EMDB ID', 'error');
+                return;
+            }
+            
+            loadMapBtn.disabled = true;
+            loadMapBtn.textContent = 'Loading...';
+            
+            try {
+                log(`Loading EMDB map ${emdbId}...`, 'info');
+                await viewer.loadEmdbMap(emdbId, { detail, server });
+                
+                loadedItems.push({ id: `EMD-${emdbId.replace('EMD-', '').replace('emd-', '')}`, type: 'map', isReference: false });
+                updateLoadedItems();
+                log(`Map loaded`);
+                
+            } catch (e) {
+                log(`Failed to load map: ${e.message}`, 'error');
+                console.error(e);
+            } finally {
+                loadMapBtn.disabled = false;
+                loadMapBtn.textContent = 'Load Map';
+            }
+        });
+        
+        clearBtn.addEventListener('click', async () => {
+            try {
+                await viewer.clear();
+                loadedItems.length = 0;
+                updateLoadedItems();
+                emdbSuggestion.textContent = '';
+                log('Cleared all');
+            } catch (e) {
+                log(`Clear failed: ${e.message}`, 'error');
+            }
+        });
+        
+        init();
+    </script>
+</body>
+</html>

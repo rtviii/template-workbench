@@ -1,0 +1,16 @@
+{
+  "name": "molstar-alignment-lib",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --outfile=dist/molstar-lib.js --format=esm",
+    "dev": "npx serve . -p 3000"
+  },
+  "dependencies": {
+    "molstar": "^4.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0",
+    "serve": "^14.0.0"
+  }
+}
