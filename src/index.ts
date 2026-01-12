@@ -249,7 +249,6 @@ export class AlignmentViewer {
     if (cartoonRepr.ref) {
       reprRefs.push(cartoonRepr.ref);
     }
-
     return reprRefs;
   }
 
