@@ -9,6 +9,8 @@ import { superpose } from 'molstar/lib/mol-model/structure/structure/util/superp
 import { Mat4 } from 'molstar/lib/mol-math/linear-algebra';
 import { setSubtreeVisibility } from 'molstar/lib/mol-plugin/behavior/static/state';
 import { Color } from 'molstar/lib/mol-util/color';
+import { Vec3 } from 'molstar/lib/mol-math/linear-algebra';
+import { Grid } from 'molstar/lib/mol-model/volume';
 
 import type { LoadedStructure, LoadedMap, LoadedItem, LoadMapOptions } from '../types';
 import { COLOR_PALETTE, getStructureSources } from '../utils';
@@ -145,16 +147,16 @@ async loadLocalVolume(url: string, label?: string, options: LoadMapOptions = {})
     }
     
     const parsed = await ccp4Format.parse(this.plugin, data, { entryId: itemId });
-    const volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+    let volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
 
     if (!volume?.isOk) {
       throw new Error('Failed to parse volume');
     }
 
-    // If we have a reference structure, align the volume to it
+    // If we have a reference structure, center the volume on it
     if (this.referenceStructure && this.referenceStructureId) {
-      console.log("[VIEWER] Aligning volume to reference structure");
-      await this.alignVolumeToStructure(volume);
+      console.log("[VIEWER] Centering volume on reference structure");
+      volume = await this.centerVolumeOnReference(volume);
     }
 
     const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
@@ -177,11 +179,91 @@ async loadLocalVolume(url: string, label?: string, options: LoadMapOptions = {})
     this.loadedItems.set(itemId, item);
     this.notifyChange();
     
+    console.log("[VIEWER] Volume loaded and aligned successfully");
     return item;
   } catch (e) {
     console.error("[VIEWER] Error loading local volume:", e);
     throw e;
   }
+}
+
+    private async centerVolumeOnReference(volumeSelector: StateObjectSelector<SO.Volume.Data>): Promise<StateObjectSelector<SO.Volume.Data>> {
+    if (!this.plugin || !this.referenceStructure) {
+        console.log("[VIEWER] No plugin or reference structure, skipping alignment");
+        return volumeSelector;
+    }
+    
+    try {
+        console.log("[VIEWER] ===== Starting volume alignment =====");
+        
+        // Get reference structure's center
+        const structCenter = this.referenceStructure.boundary.sphere.center;
+        console.log("[VIEWER] Reference structure center:", structCenter);
+        
+        // Get volume's world center using proper grid transform
+        const volumeObj = volumeSelector.data;
+        if (!volumeObj) {
+            console.log("[VIEWER] No volume data!");
+            return volumeSelector;
+        }
+        
+        // Use Grid.getGridToCartesianTransform to handle spacegroup transforms properly
+        const gridToCartesian = Grid.getGridToCartesianTransform(volumeObj.grid);
+        console.log("[VIEWER] Grid to Cartesian transform obtained");
+        
+        // Calculate grid center in voxel coordinates
+        const gridCenter = Vec3.create(
+            (volumeObj.grid.cells.space.dimensions[0] - 1) / 2,
+            (volumeObj.grid.cells.space.dimensions[1] - 1) / 2,
+            (volumeObj.grid.cells.space.dimensions[2] - 1) / 2
+        );
+        console.log("[VIEWER] Grid center (voxels):", gridCenter);
+        
+        // Transform to world coordinates
+        const volumeCenter = Vec3.transformMat4(Vec3(), gridCenter, gridToCartesian);
+        console.log("[VIEWER] Volume center (world):", volumeCenter);
+        
+        // Calculate translation
+        const translation = Vec3.sub(Vec3(), structCenter, volumeCenter);
+        console.log("[VIEWER] Translation needed:", translation);
+        
+        // Check if translation is significant
+        const translationMagnitude = Vec3.magnitude(translation);
+        console.log("[VIEWER] Translation magnitude:", translationMagnitude);
+        
+        if (translationMagnitude < 0.1) {
+            console.log("[VIEWER] Already aligned, skipping");
+            return volumeSelector;
+        }
+        
+        // Create transformation matrix
+        const matrix = Mat4.identity();
+        Mat4.setTranslation(matrix, translation);
+        console.log("[VIEWER] Transform matrix created");
+        
+        // Apply volume-specific transform (NOT Model.TransformData!)
+        console.log("[VIEWER] Applying VolumeTransform...");
+        
+        const transformed = await this.plugin.build()
+            .to(volumeSelector)
+            .apply(StateTransforms.Volume.VolumeTransform, {
+                transform: { 
+                    name: 'matrix' as const, 
+                    params: { data: matrix, transpose: false } 
+                },
+            })
+            .commit();
+        
+        console.log("[VIEWER] Transform applied, result isOk:", transformed.isOk);
+        console.log("[VIEWER] ===== Volume alignment complete =====");
+        
+        return transformed;
+        
+    } catch (e) {
+        console.error("[VIEWER] ERROR during volume alignment:", e);
+        console.error("[VIEWER] Error stack:", e instanceof Error ? e.stack : "no stack");
+        return volumeSelector;
+    }
 }
 
 private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volume.Data>): Promise<void> {
@@ -289,12 +371,11 @@ private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volu
   if (!this.plugin) throw new Error('Viewer not initialized');
   const { isoValue = 1.5 } = options;
   const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
-  const assignedColor = this.getNextColor();
+        const assignedColor = this.getNextColor();
 
   try {
-    console.log("[BRIDGE] loadVolumeFromUrl:", url);
+    console.log("[VIEWER] loadVolumeFromUrl:", url);
     
-    // Check if it's a .gz file
     const isGzipped = url.endsWith('.gz');
     
     const data = await this.plugin.build()
@@ -307,7 +388,6 @@ private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volu
       .apply(isGzipped ? StateTransforms.Data.DeflateData : StateTransforms.Data.Passthrough)
       .commit();
 
-    // Try CCP4 format first (for MRC/MAP files)
     let parsed;
     let volume;
     
@@ -318,12 +398,11 @@ private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volu
         volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
       }
     } catch (ccp4Error) {
-      console.log("[BRIDGE] CCP4 parse failed, trying other formats:", ccp4Error);
+      console.log("[VIEWER] CCP4 parse failed, trying other formats:", ccp4Error);
     }
     
-    // If CCP4 failed, try other volume formats
     if (!volume || !volume.isOk) {
-      const volumeFormats = ['dscif', 'cube']; // Try other formats
+      const volumeFormats = ['dscif', 'cube'];
       for (const formatName of volumeFormats) {
         try {
           const format = this.plugin.dataFormats.get(formatName);
@@ -339,8 +418,13 @@ private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volu
     }
     
     if (!volume?.isOk) {
-      console.error("[BRIDGE] All volume format attempts failed");
       throw new Error('Failed to parse volume with any available format');
+    }
+
+    // Center volume on reference if available
+    if (this.referenceStructure && this.referenceStructureId) {
+      console.log("[VIEWER] Centering volume on reference structure");
+      volume = await this.centerVolumeOnReference(volume);
     }
 
     const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
@@ -365,7 +449,7 @@ private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volu
 
     return item;
   } catch (e) {
-    console.error("[BRIDGE] Error in loadVolumeFromUrl:", e);
+    console.error("[VIEWER] Error in loadVolumeFromUrl:", e);
     throw e;
   }
 }
