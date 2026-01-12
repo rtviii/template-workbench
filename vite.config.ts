@@ -3,24 +3,20 @@ import { resolve } from 'path';
 
 export default defineConfig(({ mode }) => {
   if (mode === 'lib') {
-    // Library-only build (no UI)
     return {
       build: {
         lib: {
           entry: resolve(__dirname, 'src/lib/index.ts'),
           name: 'MolstarAlignmentLib',
           fileName: 'molstar-lib',
-          formats: ['es']
+          formats: ['es'],
         },
         outDir: 'dist/lib',
-        rollupOptions: {
-          external: [],
-        }
-      }
+      },
     };
   }
 
-  // Default: embed build (iframe-ready bundle)
+  // Default: dev server + embed build
   return {
     build: {
       rollupOptions: {
@@ -29,9 +25,9 @@ export default defineConfig(({ mode }) => {
         },
         output: {
           entryFileNames: '[name].js',
-          dir: 'dist'
-        }
-      }
-    }
+          dir: 'dist',
+        },
+      },
+    },
   };
 });

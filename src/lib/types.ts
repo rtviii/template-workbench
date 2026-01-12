@@ -1,5 +1,3 @@
-import type { Mat4 } from 'molstar/lib/mol-math/linear-algebra';
-
 export interface LoadedStructure {
   type: 'structure';
   id: string;
@@ -11,6 +9,13 @@ export interface LoadedStructure {
   isReference: boolean;
 }
 
+export interface VolumeStats {
+  min: number;
+  max: number;
+  mean: number;
+  sigma: number;
+}
+
 export interface LoadedMap {
   type: 'map';
   id: string;
@@ -19,6 +24,8 @@ export interface LoadedMap {
   visible: boolean;
   color: number;
   emdbId: string;
+  isoValue: number;        // relative (sigma)
+  stats: VolumeStats;
 }
 
 export type LoadedItem = LoadedStructure | LoadedMap;
@@ -32,9 +39,4 @@ export interface StructureSource {
 
 export interface LoadMapOptions {
   isoValue?: number;
-}
-
-export interface AlignmentResult {
-  rmsd: number;
-  transform: Mat4;
 }

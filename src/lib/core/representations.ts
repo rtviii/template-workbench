@@ -5,87 +5,133 @@ import { StateTransforms } from 'molstar/lib/mol-plugin-state/transforms';
 import { Color } from 'molstar/lib/mol-util/color';
 import { createVolumeRepresentationParams } from 'molstar/lib/mol-plugin-state/helpers/volume-representation-params';
 import { Volume } from 'molstar/lib/mol-model/volume';
+import type { VolumeStats } from '../types';
 
 export async function createStructureRepresentation(
-  plugin: PluginContext,
-  structureSelector: StateObjectSelector<SO.Molecule.Structure>,
-  color: number
+    plugin: PluginContext,
+    structureSelector: StateObjectSelector<SO.Molecule.Structure>,
+    color: number
 ): Promise<string[]> {
-  const structure = structureSelector.data;
-  if (!structure) return [];
+    const structure = structureSelector.data;
+    if (!structure) return [];
 
-  const reprRefs: string[] = [];
+    const reprRefs: string[] = [];
 
-  const cartoonRepr = await plugin
-    .build()
-    .to(structureSelector)
-    .apply(StateTransforms.Representation.StructureRepresentation3D, {
-      type: { name: 'cartoon', params: {} },
-      colorTheme: { name: 'uniform', params: { value: Color(color) } },
-      sizeTheme: { name: 'uniform', params: {} },
-    })
-    .commit();
+    const cartoonRepr = await plugin
+        .build()
+        .to(structureSelector)
+        .apply(StateTransforms.Representation.StructureRepresentation3D, {
+            type: { name: 'cartoon', params: {} },
+            colorTheme: { name: 'uniform', params: { value: Color(color) } },
+            sizeTheme: { name: 'uniform', params: {} },
+        })
+        .commit();
 
-  if (cartoonRepr.ref) {
-    reprRefs.push(cartoonRepr.ref);
-  }
+    if (cartoonRepr.ref) {
+        reprRefs.push(cartoonRepr.ref);
+    }
 
-  return reprRefs;
+    return reprRefs;
 }
 
 export async function createVolumeRepresentation(
-  plugin: PluginContext,
-  volume: StateObjectSelector<SO.Volume.Data>,
-  color: number,
-  isoValue: number
+    plugin: PluginContext,
+    volume: StateObjectSelector<SO.Volume.Data>,
+    color: number,
+    isoValue: number
 ): Promise<string> {
-  const repr = await plugin
-    .build()
-    .to(volume)
-    .apply(
-      StateTransforms.Representation.VolumeRepresentation3D,
-      createVolumeRepresentationParams(plugin, volume.data!, {
-        type: 'isosurface',
-        typeParams: { alpha: 0.4, isoValue: Volume.IsoValue.relative(isoValue) },
-        color: 'uniform',
-        colorParams: { value: Color(color) },
-      })
-    )
-    .commit();
+    const repr = await plugin
+        .build()
+        .to(volume)
+        .apply(
+            StateTransforms.Representation.VolumeRepresentation3D,
+            createVolumeRepresentationParams(plugin, volume.data!, {
+                type: 'isosurface',
+                typeParams: { alpha: 0.4, isoValue: Volume.IsoValue.relative(isoValue) },
+                color: 'uniform',
+                colorParams: { value: Color(color) },
+            })
+        )
+        .commit();
 
-  return repr.ref;
+    return repr.ref;
 }
 
 export async function updateStructureColor(
-  plugin: PluginContext,
-  reprRefs: string[],
-  color: number
+    plugin: PluginContext,
+    reprRefs: string[],
+    color: number
 ): Promise<void> {
-  if (reprRefs.length === 0) return;
+    if (reprRefs.length === 0) return;
 
-  const update = plugin.build();
-  for (const ref of reprRefs) {
-    update.to(ref).update((old) => ({
-      ...old,
-      colorTheme: { name: 'uniform', params: { value: Color(color) } },
-    }));
-  }
-  await update.commit();
+    const update = plugin.build();
+    for (const ref of reprRefs) {
+        update.to(ref).update((old) => ({
+            ...old,
+            colorTheme: { name: 'uniform', params: { value: Color(color) } },
+        }));
+    }
+    await update.commit();
 }
 
 export async function updateVolumeColor(
-  plugin: PluginContext,
-  reprRef: string,
-  color: number
+    plugin: PluginContext,
+    reprRef: string,
+    color: number
 ): Promise<void> {
-  if (!reprRef) return;
+    if (!reprRef) return;
 
-  await plugin
-    .build()
-    .to(reprRef)
-    .update((old) => ({
-      ...old,
-      colorTheme: { name: 'uniform', params: { value: Color(color) } },
-    }))
-    .commit();
+    await plugin
+        .build()
+        .to(reprRef)
+        .update((old) => ({
+            ...old,
+            colorTheme: { name: 'uniform', params: { value: Color(color) } },
+        }))
+        .commit();
+}
+
+export async function updateVolumeIsoValue(
+    plugin: PluginContext,
+    reprRef: string,
+    isoValue: number
+): Promise<void> {
+    if (!reprRef) return;
+
+    await plugin
+        .build()
+        .to(reprRef)
+        .update((old) => ({
+            ...old,
+            type: {
+                ...old.type,
+                params: {
+                    ...old.type.params,
+                    isoValue: Volume.IsoValue.relative(isoValue),
+                },
+            },
+        }))
+        .commit();
+}
+
+export function getVolumeStats(volume: SO.Volume.Data): VolumeStats {
+    const grid = volume.data?.grid;
+    if (!grid?.stats) {
+        return { min: -1, max: 1, mean: 0, sigma: 0.1 };
+    }
+    return {
+        min: grid.stats.min,
+        max: grid.stats.max,
+        mean: grid.stats.mean,
+        sigma: grid.stats.sigma,
+    };
+}
+
+export function relativeToAbsolute(relValue: number, stats: VolumeStats): number {
+    return stats.mean + relValue * stats.sigma;
+}
+
+export function absoluteToRelative(absValue: number, stats: VolumeStats): number {
+    if (stats.sigma === 0) return 0;
+    return (absValue - stats.mean) / stats.sigma;
 }

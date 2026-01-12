@@ -13,317 +13,327 @@ import { Color } from 'molstar/lib/mol-util/color';
 import type { LoadedStructure, LoadedMap, LoadedItem, LoadMapOptions } from '../types';
 import { COLOR_PALETTE, getStructureSources } from '../utils';
 import {
-  createStructureRepresentation,
-  createVolumeRepresentation,
-  updateStructureColor,
-  updateVolumeColor,
+    createStructureRepresentation,
+    createVolumeRepresentation,
+    updateStructureColor,
+    updateVolumeColor,
+    updateVolumeIsoValue,
+    getVolumeStats,
+    relativeToAbsolute,
 } from './representations';
+import { STYLIZED_POSTPROCESSING } from './postprocessing';
+// Add this type near the top of the file
+
 
 export class AlignmentViewer {
-  plugin: PluginContext | null = null;
+    plugin: PluginContext | null = null;
 
-  private referenceStructure: Structure | null = null;
-  private referenceStructureId: string | null = null;
-  private structureTransforms: Map<string, Mat4> = new Map();
-  private loadedItems: Map<string, LoadedItem> = new Map();
-  private onChangeCallbacks: Set<() => void> = new Set();
-  private colorIndex = 0;
+    private referenceStructure: Structure | null = null;
+    private referenceStructureId: string | null = null;
+    private structureTransforms: Map<string, Mat4> = new Map();
+    private loadedItems: Map<string, LoadedItem> = new Map();
+    private onChangeCallbacks: Set<() => void> = new Set();
+    private colorIndex = 0;
 
-  async init(container: HTMLElement): Promise<void> {
-    const canvas = document.createElement('canvas');
-    container.appendChild(canvas);
+    async init(container: HTMLElement): Promise<void> {
+        const canvas = document.createElement('canvas');
+        container.appendChild(canvas);
 
-    const spec = DefaultPluginSpec();
-    this.plugin = new PluginContext(spec);
-    await this.plugin.init();
-    this.plugin.initViewer(canvas, container);
+        const spec = DefaultPluginSpec();
+        this.plugin = new PluginContext(spec);
+        await this.plugin.init();
+        this.plugin.initViewer(canvas, container);
 
-    const renderer = this.plugin.canvas3d?.props.renderer;
-    PluginCommands.Canvas3D.SetSettings(this.plugin, {
-      settings: { renderer: { ...renderer, backgroundColor: Color(0xffffff) } },
-    });
-  }
+        const renderer = this.plugin.canvas3d?.props.renderer;
+        const postprocessing = this.plugin.canvas3d?.props.postprocessing;
 
-  private showToast(message: string, timeoutMs = 5000): void {
-    if (!this.plugin) return;
-    PluginCommands.Toast.Show(this.plugin, { title: 'Progress', message, timeoutMs });
-  }
+        PluginCommands.Canvas3D.SetSettings(this.plugin, {
+            settings: {
+                renderer: { ...renderer, backgroundColor: Color(0xffffff) },
+                postprocessing: { ...postprocessing, ...STYLIZED_POSTPROCESSING },
+            },
+        });
+    }
 
-  onChange(callback: () => void): () => void {
-    this.onChangeCallbacks.add(callback);
-    return () => this.onChangeCallbacks.delete(callback);
-  }
 
-  private notifyChange(): void {
-    this.onChangeCallbacks.forEach((cb) => cb());
-  }
+    onChange(callback: () => void): () => void {
+        this.onChangeCallbacks.add(callback);
+        return () => this.onChangeCallbacks.delete(callback);
+    }
 
-  getLoadedItems(): LoadedItem[] {
-    return Array.from(this.loadedItems.values());
-  }
+    private notifyChange(): void {
+        this.onChangeCallbacks.forEach((cb) => cb());
+    }
 
-  getReferenceId(): string | null {
-    return this.referenceStructureId;
-  }
+    getLoadedItems(): LoadedItem[] {
+        return Array.from(this.loadedItems.values());
+    }
 
-  private getNextColor(): number {
-    const color = COLOR_PALETTE[this.colorIndex % COLOR_PALETTE.length];
-    this.colorIndex++;
-    return color;
-  }
+    getReferenceId(): string | null {
+        return this.referenceStructureId;
+    }
 
-  async loadStructure(pdbId: string): Promise<LoadedStructure> {
-    if (!this.plugin) throw new Error('Viewer not initialized');
+    private getNextColor(): number {
+        const color = COLOR_PALETTE[this.colorIndex % COLOR_PALETTE.length];
+        this.colorIndex++;
+        return color;
+    }
 
-    const structureId = pdbId.toUpperCase();
-    const sources = getStructureSources(pdbId);
-    const assignedColor = this.getNextColor();
+    async loadStructure(pdbId: string): Promise<LoadedStructure> {
+        if (!this.plugin) throw new Error('Viewer not initialized');
 
-    let lastError: Error | null = null;
+        const structureId = pdbId.toUpperCase();
+        const sources = getStructureSources(pdbId);
+        const assignedColor = this.getNextColor();
 
-    for (const source of sources) {
-      try {
-        this.showToast(`Downloading ${structureId} (${source.label})...`, 30000);
+        let lastError: Error | null = null;
 
-        const data = await this.plugin.builders.data.download({
-          url: source.url,
-          isBinary: source.isBinary,
+        for (const source of sources) {
+            try {
+                // Builders handle task system internally - call directly
+                const data = await this.plugin.builders.data.download({
+                    url: source.url,
+                    isBinary: source.isBinary,
+                });
+
+                const trajectory = await this.plugin.builders.structure.parseTrajectory(data, source.format);
+                const model = await this.plugin.builders.structure.createModel(trajectory);
+                const structureSelector = await this.plugin.builders.structure.createStructure(model);
+
+                const structure = structureSelector.data;
+                if (!structure) throw new Error('Structure data is null');
+
+                const isReference = !this.referenceStructure;
+                if (!isReference) {
+                    const transform = this.computeAlignmentTransform(this.referenceStructure!, structure);
+                    if (transform) {
+                        await this.applyStructureTransform(structureSelector, transform);
+                        this.structureTransforms.set(structureId, transform);
+                    } else {
+                        this.structureTransforms.set(structureId, Mat4.identity());
+                    }
+                } else {
+                    this.referenceStructure = structure;
+                    this.referenceStructureId = structureId;
+                    this.structureTransforms.set(structureId, Mat4.identity());
+                }
+
+                const reprRefs = await createStructureRepresentation(this.plugin, structureSelector, assignedColor);
+
+                const item: LoadedStructure = {
+                    type: 'structure',
+                    id: structureId,
+                    ref: structureSelector.ref,
+                    representationRefs: reprRefs,
+                    visible: true,
+                    color: assignedColor,
+                    format: source.label,
+                    isReference,
+                };
+
+                this.loadedItems.set(structureId, item);
+                this.notifyChange();
+
+                return item;
+            } catch (e) {
+                lastError = e as Error;
+                console.warn(`Failed ${source.label}: ${lastError.message}`);
+                continue;
+            }
+        }
+
+        throw new Error(`Failed to load structure ${pdbId}: ${lastError?.message}`);
+    }
+
+    async loadEmdbMap(emdbId: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
+        if (!this.plugin) throw new Error('Viewer not initialized');
+
+        const { isoValue = 1.5 } = options;
+        const cleanId = emdbId.toUpperCase().replace('EMD-', '');
+        const numericId = parseInt(cleanId);
+        const itemId = `EMD-${cleanId}`;
+        const assignedColor = this.getNextColor();
+
+        const url = `https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-${numericId}/map/emd_${numericId}.map.gz`;
+
+        try {
+            const data = await this.plugin
+                .build()
+                .toRoot()
+                .apply(StateTransforms.Data.Download, { url, isBinary: true, label: itemId }, { state: { isGhost: true } })
+                .apply(StateTransforms.Data.DeflateData)
+                .commit();
+
+            const parsed = await this.plugin.dataFormats.get('ccp4')!.parse(this.plugin, data, { entryId: itemId });
+            const volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+
+            if (!volume?.isOk) throw new Error('Failed to parse volume');
+
+            const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
+            const stats = getVolumeStats(volumeObj);
+
+            const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
+
+            const item: LoadedMap = {
+                type: 'map',
+                id: itemId,
+                volumeRef: volume.ref,
+                representationRef: reprRef,
+                visible: true,
+                color: assignedColor,
+                emdbId: cleanId,
+                isoValue,
+                stats,
+            };
+
+            this.loadedItems.set(itemId, item);
+            this.notifyChange();
+
+            return item;
+        } catch (e) {
+            throw e;
+        }
+    }
+
+    async setItemVisibility(itemId: string, visible: boolean): Promise<void> {
+        if (!this.plugin) return;
+
+        const item = this.loadedItems.get(itemId);
+        if (!item) return;
+
+        const ref = item.type === 'structure' ? item.ref : item.volumeRef;
+        setSubtreeVisibility(this.plugin.state.data, ref, !visible);
+
+        item.visible = visible;
+        this.notifyChange();
+    }
+
+    async setItemColor(itemId: string, color: number): Promise<void> {
+        if (!this.plugin) return;
+
+        const item = this.loadedItems.get(itemId);
+        if (!item) return;
+
+        if (item.type === 'structure') {
+            await updateStructureColor(this.plugin, item.representationRefs, color);
+        } else {
+            await updateVolumeColor(this.plugin, item.representationRef, color);
+        }
+
+        item.color = color;
+        this.notifyChange();
+    }
+
+    async setMapIsoValue(itemId: string, isoValue: number): Promise<void> {
+        if (!this.plugin) return;
+
+        const item = this.loadedItems.get(itemId);
+        if (!item || item.type !== 'map') return;
+
+        await updateVolumeIsoValue(this.plugin, item.representationRef, isoValue);
+        item.isoValue = isoValue;
+        this.notifyChange();
+    }
+
+    getMapAbsoluteIsoValue(itemId: string): number | null {
+        const item = this.loadedItems.get(itemId);
+        if (!item || item.type !== 'map') return null;
+        return relativeToAbsolute(item.isoValue, item.stats);
+    }
+
+    async deleteItem(itemId: string): Promise<void> {
+        if (!this.plugin) return;
+
+        const item = this.loadedItems.get(itemId);
+        if (!item) return;
+
+        const ref = item.type === 'structure' ? item.ref : item.volumeRef;
+
+        let rootRef = ref;
+        const findRoot = (r: string): string => {
+            const cell = this.plugin!.state.data.cells.get(r);
+            const parentRef = cell?.transform.parent;
+            if (parentRef && parentRef !== this.plugin!.state.data.tree.root.ref) {
+                return findRoot(parentRef);
+            }
+            return r;
+        };
+        rootRef = findRoot(ref);
+
+        await PluginCommands.State.RemoveObject(this.plugin, {
+            state: this.plugin.state.data,
+            ref: rootRef,
+            removeParentGhosts: true,
         });
 
-        this.showToast(`Parsing ${structureId}...`, 30000);
-
-        const trajectory = await this.plugin.builders.structure.parseTrajectory(data, source.format);
-        const model = await this.plugin.builders.structure.createModel(trajectory);
-        const structureSelector = await this.plugin.builders.structure.createStructure(model);
-
-        const structure = structureSelector.data;
-        if (!structure) throw new Error('Structure data is null');
-
-        const isReference = !this.referenceStructure;
-        if (!isReference) {
-          this.showToast(`Aligning ${structureId} to reference...`, 30000);
-          const transform = this.computeAlignmentTransform(this.referenceStructure!, structure);
-          if (transform) {
-            await this.applyStructureTransform(structureSelector, transform);
-            this.structureTransforms.set(structureId, transform);
-          } else {
-            this.structureTransforms.set(structureId, Mat4.identity());
-          }
-        } else {
-          this.referenceStructure = structure;
-          this.referenceStructureId = structureId;
-          this.structureTransforms.set(structureId, Mat4.identity());
+        if (item.type === 'structure' && item.isReference) {
+            this.referenceStructure = null;
+            this.referenceStructureId = null;
+            for (const [, otherItem] of this.loadedItems) {
+                if (otherItem.type === 'structure' && otherItem.id !== itemId) {
+                    otherItem.isReference = true;
+                    break;
+                }
+            }
         }
 
-        this.showToast(`Creating representation...`, 30000);
-
-        const reprRefs = await createStructureRepresentation(this.plugin, structureSelector, assignedColor);
-
-        const item: LoadedStructure = {
-          type: 'structure',
-          id: structureId,
-          ref: structureSelector.ref,
-          representationRefs: reprRefs,
-          visible: true,
-          color: assignedColor,
-          format: source.label,
-          isReference,
-        };
-
-        this.loadedItems.set(structureId, item);
+        this.loadedItems.delete(itemId);
+        this.structureTransforms.delete(itemId);
         this.notifyChange();
-        this.showToast(`${structureId} loaded`, 2000);
-
-        return item;
-      } catch (e) {
-        lastError = e as Error;
-        console.warn(`Failed ${source.label}: ${lastError.message}`);
-        continue;
-      }
     }
 
-    this.showToast(`Failed to load ${structureId}`, 5000);
-    throw new Error(`Failed to load structure ${pdbId}: ${lastError?.message}`);
-  }
+    async clear(): Promise<void> {
+        if (!this.plugin) return;
 
-  async loadEmdbMap(emdbId: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
-    if (!this.plugin) throw new Error('Viewer not initialized');
+        await PluginCommands.State.RemoveObject(this.plugin, {
+            state: this.plugin.state.data,
+            ref: this.plugin.state.data.tree.root.ref,
+            removeParentGhosts: true,
+        });
 
-    const { isoValue = 1.5 } = options;
-    const cleanId = emdbId.toUpperCase().replace('EMD-', '');
-    const numericId = parseInt(cleanId);
-    const itemId = `EMD-${cleanId}`;
-    const assignedColor = this.getNextColor();
-
-    const url = `https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-${numericId}/map/emd_${numericId}.map.gz`;
-
-    try {
-      this.showToast(`Downloading ${itemId} (this may take a while)...`, 120000);
-
-      const data = await this.plugin
-        .build()
-        .toRoot()
-        .apply(StateTransforms.Data.Download, { url, isBinary: true, label: itemId }, { state: { isGhost: true } })
-        .apply(StateTransforms.Data.DeflateData)
-        .commit();
-
-      this.showToast(`Parsing ${itemId}...`, 60000);
-
-      const parsed = await this.plugin.dataFormats.get('ccp4')!.parse(this.plugin, data, { entryId: itemId });
-      const volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
-
-      if (!volume?.isOk) throw new Error('Failed to parse volume');
-
-      this.showToast(`Creating isosurface...`, 30000);
-
-      const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
-
-      const item: LoadedMap = {
-        type: 'map',
-        id: itemId,
-        volumeRef: volume.ref,
-        representationRef: reprRef,
-        visible: true,
-        color: assignedColor,
-        emdbId: cleanId,
-      };
-
-      this.loadedItems.set(itemId, item);
-      this.notifyChange();
-      this.showToast(`${itemId} loaded`, 2000);
-
-      return item;
-    } catch (e) {
-      this.showToast(`Failed to load ${itemId}`, 5000);
-      throw e;
-    }
-  }
-
-  async setItemVisibility(itemId: string, visible: boolean): Promise<void> {
-    if (!this.plugin) return;
-
-    const item = this.loadedItems.get(itemId);
-    if (!item) return;
-
-    const ref = item.type === 'structure' ? item.ref : item.volumeRef;
-    setSubtreeVisibility(this.plugin.state.data, ref, !visible);
-
-    item.visible = visible;
-    this.notifyChange();
-  }
-
-  async setItemColor(itemId: string, color: number): Promise<void> {
-    if (!this.plugin) return;
-
-    const item = this.loadedItems.get(itemId);
-    if (!item) return;
-
-    if (item.type === 'structure') {
-      await updateStructureColor(this.plugin, item.representationRefs, color);
-    } else {
-      await updateVolumeColor(this.plugin, item.representationRef, color);
+        this.referenceStructure = null;
+        this.referenceStructureId = null;
+        this.structureTransforms.clear();
+        this.loadedItems.clear();
+        this.colorIndex = 0;
+        this.notifyChange();
     }
 
-    item.color = color;
-    this.notifyChange();
-  }
+    dispose(): void {
+        this.plugin?.dispose();
+        this.plugin = null;
+    }
 
-  async deleteItem(itemId: string): Promise<void> {
-    if (!this.plugin) return;
+    private computeAlignmentTransform(reference: Structure, mobile: Structure): Mat4 | null {
+        const refLoci = StructureElement.Loci.all(reference);
+        const mobileLoci = StructureElement.Loci.all(mobile);
+        const results = superpose([refLoci, mobileLoci]);
 
-    const item = this.loadedItems.get(itemId);
-    if (!item) return;
-
-    const ref = item.type === 'structure' ? item.ref : item.volumeRef;
-
-    // Find root data node
-    let rootRef = ref;
-    const findRoot = (r: string): string => {
-      const cell = this.plugin!.state.data.cells.get(r);
-      const parentRef = cell?.transform.parent;
-      if (parentRef && parentRef !== this.plugin!.state.data.tree.root.ref) {
-        return findRoot(parentRef);
-      }
-      return r;
-    };
-    rootRef = findRoot(ref);
-
-    await PluginCommands.State.RemoveObject(this.plugin, {
-      state: this.plugin.state.data,
-      ref: rootRef,
-      removeParentGhosts: true,
-    });
-
-    // Handle reference structure deletion
-    if (item.type === 'structure' && item.isReference) {
-      this.referenceStructure = null;
-      this.referenceStructureId = null;
-      // Promote next structure to reference
-      for (const [, otherItem] of this.loadedItems) {
-        if (otherItem.type === 'structure' && otherItem.id !== itemId) {
-          otherItem.isReference = true;
-          break;
+        if (results.length === 0 || Number.isNaN(results[0].rmsd)) {
+            return null;
         }
-      }
+        console.log(`Alignment RMSD: ${results[0].rmsd.toFixed(2)} A`);
+        return results[0].transform;
     }
 
-    this.loadedItems.delete(itemId);
-    this.structureTransforms.delete(itemId);
-    this.notifyChange();
-  }
+    private async applyStructureTransform(
+        selector: StateObjectSelector<SO.Molecule.Structure>,
+        transform: Mat4
+    ): Promise<void> {
+        if (!this.plugin) return;
 
-  async clear(): Promise<void> {
-    if (!this.plugin) return;
-
-    await PluginCommands.State.RemoveObject(this.plugin, {
-      state: this.plugin.state.data,
-      ref: this.plugin.state.data.tree.root.ref,
-      removeParentGhosts: true,
-    });
-
-    this.referenceStructure = null;
-    this.referenceStructureId = null;
-    this.structureTransforms.clear();
-    this.loadedItems.clear();
-    this.colorIndex = 0;
-    this.notifyChange();
-  }
-
-  dispose(): void {
-    this.plugin?.dispose();
-    this.plugin = null;
-  }
-
-  private computeAlignmentTransform(reference: Structure, mobile: Structure): Mat4 | null {
-    const refLoci = StructureElement.Loci.all(reference);
-    const mobileLoci = StructureElement.Loci.all(mobile);
-    const results = superpose([refLoci, mobileLoci]);
-
-    if (results.length === 0 || Number.isNaN(results[0].rmsd)) {
-      return null;
+        await this.plugin
+            .build()
+            .to(selector)
+            .apply(StateTransforms.Model.TransformStructureConformation, {
+                transform: { name: 'matrix' as const, params: { data: transform, transpose: false } },
+            })
+            .commit();
     }
-    console.log(`Alignment RMSD: ${results[0].rmsd.toFixed(2)} A`);
-    return results[0].transform;
-  }
-
-  private async applyStructureTransform(
-    selector: StateObjectSelector<SO.Molecule.Structure>,
-    transform: Mat4
-  ): Promise<void> {
-    if (!this.plugin) return;
-
-    await this.plugin
-      .build()
-      .to(selector)
-      .apply(StateTransforms.Model.TransformStructureConformation, {
-        transform: { name: 'matrix' as const, params: { data: transform, transpose: false } },
-      })
-      .commit();
-  }
 }
 
 export async function createAlignmentViewer(container: HTMLElement): Promise<AlignmentViewer> {
-  const viewer = new AlignmentViewer();
-  await viewer.init(container);
-  return viewer;
+    const viewer = new AlignmentViewer();
+    await viewer.init(container);
+    return viewer;
 }

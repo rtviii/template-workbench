@@ -6,6 +6,7 @@ export type BridgeCommand =
   | { action: 'loadEmdbMap'; emdbId: string; isoValue?: number }
   | { action: 'setVisibility'; itemId: string; visible: boolean }
   | { action: 'setColor'; itemId: string; color: number }
+  | { action: 'setIsoValue'; itemId: string; isoValue: number }
   | { action: 'deleteItem'; itemId: string }
   | { action: 'clear' }
   | { action: 'getItems' };
@@ -50,6 +51,10 @@ export async function initBridge(container: HTMLElement): Promise<AlignmentViewe
         }
         case 'setColor': {
           await viewer.setItemColor(cmd.itemId, cmd.color);
+          break;
+        }
+        case 'setIsoValue': {
+          await viewer.setMapIsoValue(cmd.itemId, cmd.isoValue);
           break;
         }
         case 'deleteItem': {
