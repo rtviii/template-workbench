@@ -1,7 +1,7 @@
 import { PluginCommands } from 'molstar/lib/mol-plugin/commands';
 import { PluginContext } from 'molstar/lib/mol-plugin/context';
 import { DefaultPluginSpec } from 'molstar/lib/mol-plugin/spec';
-import { StateObjectSelector } from 'molstar/lib/mol-state';
+import { StateObjectSelector, StateSelection } from 'molstar/lib/mol-state';
 import { PluginStateObject as SO } from 'molstar/lib/mol-plugin-state/objects';
 import { StateTransforms } from 'molstar/lib/mol-plugin-state/transforms';
 import { Structure, StructureElement } from 'molstar/lib/mol-model/structure';
@@ -21,6 +21,7 @@ import {
     getVolumeStats,
     relativeToAbsolute,
 } from './representations';
+
 import { STYLIZED_POSTPROCESSING } from './postprocessing';
 
 export class AlignmentViewer {
@@ -39,10 +40,11 @@ export class AlignmentViewer {
 
         const spec = DefaultPluginSpec();
         this.plugin = new PluginContext(spec);
+
         await this.plugin.init();
         this.plugin.initViewer(canvas, container);
 
-        const renderer = this.plugin.canvas3d?.props.renderer;
+        const renderer       = this.plugin.canvas3d?.props.renderer;
         const postprocessing = this.plugin.canvas3d?.props.postprocessing;
 
         PluginCommands.Canvas3D.SetSettings(this.plugin, {
@@ -113,6 +115,127 @@ export class AlignmentViewer {
         this.notifyChange();
         return item;
     }
+// Update the loadLocalVolume method in AlignmentViewer.ts
+async loadLocalVolume(url: string, label?: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
+  if (!this.plugin) throw new Error('Viewer not initialized');
+  
+  const { isoValue = 1.5 } = options;
+  const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
+  const assignedColor = this.getNextColor();
+
+  try {
+    console.log("[VIEWER] Loading local volume:", url);
+    
+    const data = await this.plugin.build()
+      .toRoot()
+      .apply(StateTransforms.Data.Download, { 
+        url, 
+        isBinary: true, 
+        label: itemId 
+      }, { state: { isGhost: true } })
+      .commit();
+    
+    if (!data.isOk) {
+      throw new Error(`Download failed`);
+    }
+
+    const ccp4Format = this.plugin.dataFormats.get('ccp4');
+    if (!ccp4Format) {
+      throw new Error('CCP4 format parser not available');
+    }
+    
+    const parsed = await ccp4Format.parse(this.plugin, data, { entryId: itemId });
+    const volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+
+    if (!volume?.isOk) {
+      throw new Error('Failed to parse volume');
+    }
+
+    // If we have a reference structure, align the volume to it
+    if (this.referenceStructure && this.referenceStructureId) {
+      console.log("[VIEWER] Aligning volume to reference structure");
+      await this.alignVolumeToStructure(volume);
+    }
+
+    const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
+    const stats = getVolumeStats(volumeObj);
+
+    const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
+
+    const item: LoadedMap = {
+      type: 'map',
+      id: itemId,
+      volumeRef: volume.ref,
+      representationRef: reprRef,
+      visible: true,
+      color: assignedColor,
+      emdbId: itemId,
+      isoValue,
+      stats,
+    };
+
+    this.loadedItems.set(itemId, item);
+    this.notifyChange();
+    
+    return item;
+  } catch (e) {
+    console.error("[VIEWER] Error loading local volume:", e);
+    throw e;
+  }
+}
+
+private async alignVolumeToStructure(volumeSelector: StateObjectSelector<SO.Volume.Data>): Promise<void> {
+  if (!this.plugin || !this.referenceStructure) return;
+  
+  try {
+    // Get structure center
+    const structureObj = this.plugin.state.data.select(
+      StateSelection.Generators.byRef(this.referenceStructureId!)
+    )[0]?.obj as SO.Molecule.Structure | undefined;
+    
+    if (!structureObj) return;
+    
+    const structureData = structureObj.data;
+    const boundary = structureData.boundary;
+    const structureCenter = boundary.sphere.center;
+    
+    console.log("[VIEWER] Structure center:", structureCenter);
+    
+    // Get volume data
+    const volumeObj = volumeSelector.data;
+    if (!volumeObj) return;
+    
+    const grid = volumeObj.grid;
+    const volumeCenter = [
+      (grid.cells.space.dimensions[0] / 2) * grid.cells.space.size[0],
+      (grid.cells.space.dimensions[1] / 2) * grid.cells.space.size[1],
+      (grid.cells.space.dimensions[2] / 2) * grid.cells.space.size[2],
+    ];
+    
+    console.log("[VIEWER] Volume center:", volumeCenter);
+    
+    // Calculate translation to align centers
+    const translation = Mat4.identity();
+    Mat4.setTranslation(translation, [
+      structureCenter[0] - volumeCenter[0],
+      structureCenter[1] - volumeCenter[1],
+      structureCenter[2] - volumeCenter[2],
+    ]);
+    
+    console.log("[VIEWER] Applying translation to volume");
+    
+    // Apply transform
+    await this.plugin.build()
+      .to(volumeSelector)
+      .apply(StateTransforms.Model.TransformData, {
+        transform: { name: 'matrix' as const, params: { data: translation, transpose: false } },
+      })
+      .commit();
+      
+  } catch (e) {
+    console.warn("[VIEWER] Could not align volume to structure:", e);
+  }
+}
 
     async loadStructure(pdbId: string): Promise<LoadedStructure> {
         if (!this.plugin) throw new Error('Viewer not initialized');
@@ -163,48 +286,89 @@ export class AlignmentViewer {
     }
 
     async loadVolumeFromUrl(url: string, label?: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
-        if (!this.plugin) throw new Error('Viewer not initialized');
-        const { isoValue = 1.5 } = options;
-        const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
-        const assignedColor = this.getNextColor();
+  if (!this.plugin) throw new Error('Viewer not initialized');
+  const { isoValue = 1.5 } = options;
+  const itemId = label || url.split('/').pop()?.split('?')[0] || 'local_volume';
+  const assignedColor = this.getNextColor();
 
-        try {
-            const data = await this.plugin.build()
-                .toRoot()
-                .apply(StateTransforms.Data.Download, { url, isBinary: true, label: itemId }, { state: { isGhost: true } })
-                .apply(url.endsWith('.gz') ? StateTransforms.Data.DeflateData : StateTransforms.Data.Passthrough)
-                .commit();
+  try {
+    console.log("[BRIDGE] loadVolumeFromUrl:", url);
+    
+    // Check if it's a .gz file
+    const isGzipped = url.endsWith('.gz');
+    
+    const data = await this.plugin.build()
+      .toRoot()
+      .apply(StateTransforms.Data.Download, { 
+        url, 
+        isBinary: true, 
+        label: itemId 
+      }, { state: { isGhost: true } })
+      .apply(isGzipped ? StateTransforms.Data.DeflateData : StateTransforms.Data.Passthrough)
+      .commit();
 
-            const parsed = await this.plugin.dataFormats.get('ccp4')!.parse(this.plugin, data, { entryId: itemId });
-            const volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
-
-            if (!volume?.isOk) throw new Error('Failed to parse volume');
-
-            const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
-            const stats = getVolumeStats(volumeObj);
-
-            const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
-
-            const item: LoadedMap = {
-                type: 'map',
-                id: itemId,
-                volumeRef: volume.ref,
-                representationRef: reprRef,
-                visible: true,
-                color: assignedColor,
-                emdbId: itemId,
-                isoValue,
-                stats,
-            };
-
-            this.loadedItems.set(itemId, item);
-            this.notifyChange();
-
-            return item;
-        } catch (e) {
-            throw e;
-        }
+    // Try CCP4 format first (for MRC/MAP files)
+    let parsed;
+    let volume;
+    
+    try {
+      const ccp4Format = this.plugin.dataFormats.get('ccp4');
+      if (ccp4Format) {
+        parsed = await ccp4Format.parse(this.plugin, data, { entryId: itemId });
+        volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+      }
+    } catch (ccp4Error) {
+      console.log("[BRIDGE] CCP4 parse failed, trying other formats:", ccp4Error);
     }
+    
+    // If CCP4 failed, try other volume formats
+    if (!volume || !volume.isOk) {
+      const volumeFormats = ['dscif', 'cube']; // Try other formats
+      for (const formatName of volumeFormats) {
+        try {
+          const format = this.plugin.dataFormats.get(formatName);
+          if (format) {
+            parsed = await format.parse(this.plugin, data, { entryId: itemId });
+            volume = (parsed.volume || parsed.volumes?.[0]) as StateObjectSelector<SO.Volume.Data>;
+            if (volume && volume.isOk) break;
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+    }
+    
+    if (!volume?.isOk) {
+      console.error("[BRIDGE] All volume format attempts failed");
+      throw new Error('Failed to parse volume with any available format');
+    }
+
+    const volumeObj = this.plugin.state.data.cells.get(volume.ref)?.obj as SO.Volume.Data;
+    const stats = getVolumeStats(volumeObj);
+
+    const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, isoValue);
+
+    const item: LoadedMap = {
+      type: 'map',
+      id: itemId,
+      volumeRef: volume.ref,
+      representationRef: reprRef,
+      visible: true,
+      color: assignedColor,
+      emdbId: itemId,
+      isoValue,
+      stats,
+    };
+
+    this.loadedItems.set(itemId, item);
+    this.notifyChange();
+
+    return item;
+  } catch (e) {
+    console.error("[BRIDGE] Error in loadVolumeFromUrl:", e);
+    throw e;
+  }
+}
 
     async setItemVisibility(itemId: string, visible: boolean): Promise<void> {
         if (!this.plugin) return;
