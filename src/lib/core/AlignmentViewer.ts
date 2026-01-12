@@ -172,7 +172,73 @@ export class AlignmentViewer {
         return item;
     }
 
+    private async centerVolumeOnVolume(
+        volumeSelector: StateObjectSelector<SO.Volume.Data>,
+        referenceVolumeObj: SO.Volume.Data
+    ): Promise<StateObjectSelector<SO.Volume.Data>> {
+        if (!this.plugin) return volumeSelector;
 
+        try {
+            console.log("[VIEWER] ===== Starting volume-to-volume alignment =====");
+
+            // Get reference volume center
+            const refGridToCartesian = Grid.getGridToCartesianTransform(referenceVolumeObj.grid);
+            const refGridCenter = Vec3.create(
+                (referenceVolumeObj.grid.cells.space.dimensions[0] - 1) / 2,
+                (referenceVolumeObj.grid.cells.space.dimensions[1] - 1) / 2,
+                (referenceVolumeObj.grid.cells.space.dimensions[2] - 1) / 2
+            );
+            const refVolumeCenter = Vec3.transformMat4(Vec3(), refGridCenter, refGridToCartesian);
+            console.log("[VIEWER] Reference volume center:", refVolumeCenter);
+
+            // Get current volume center
+            const volumeObj = volumeSelector.data;
+            if (!volumeObj) return volumeSelector;
+
+            const gridToCartesian = Grid.getGridToCartesianTransform(volumeObj.grid);
+            const gridCenter = Vec3.create(
+                (volumeObj.grid.cells.space.dimensions[0] - 1) / 2,
+                (volumeObj.grid.cells.space.dimensions[1] - 1) / 2,
+                (volumeObj.grid.cells.space.dimensions[2] - 1) / 2
+            );
+            const volumeCenter = Vec3.transformMat4(Vec3(), gridCenter, gridToCartesian);
+            console.log("[VIEWER] Current volume center:", volumeCenter);
+
+            // Calculate translation
+            const translation = Vec3.sub(Vec3(), refVolumeCenter, volumeCenter);
+            console.log("[VIEWER] Translation needed:", translation);
+
+            const translationMagnitude = Vec3.magnitude(translation);
+            console.log("[VIEWER] Translation magnitude:", translationMagnitude);
+
+            if (translationMagnitude < 0.1) {
+                console.log("[VIEWER] Already aligned, skipping");
+                return volumeSelector;
+            }
+
+            // Create and apply transformation
+            const matrix = Mat4.identity();
+            Mat4.setTranslation(matrix, translation);
+
+            console.log("[VIEWER] Applying VolumeTransform...");
+            const transformed = await this.plugin.build()
+                .to(volumeSelector)
+                .apply(StateTransforms.Volume.VolumeTransform, {
+                    transform: {
+                        name: 'matrix' as const,
+                        params: { data: matrix, transpose: false }
+                    },
+                })
+                .commit();
+
+            console.log("[VIEWER] Volume-to-volume alignment complete");
+            return transformed;
+
+        } catch (e) {
+            console.error("[VIEWER] ERROR during volume-to-volume alignment:", e);
+            return volumeSelector;
+        }
+    }
     // Update the loadLocalVolume method in AlignmentViewer.ts
     async loadLocalVolume(url: string, label?: string, options: LoadMapOptions = {}): Promise<LoadedMap> {
         if (!this.plugin) throw new Error('Viewer not initialized');
@@ -182,6 +248,7 @@ export class AlignmentViewer {
         const assignedColor = this.getNextColor();
 
         try {
+            console.log("[VIEWER] Loading local volume:", url);
 
             const data = await this.plugin.build()
                 .toRoot()
@@ -217,21 +284,29 @@ export class AlignmentViewer {
 
             if (isInverted) {
                 actualIsoValue = -Math.abs(isoValue);
+                console.log("[VIEWER] Detected inverted/black template, using negative ISO:", actualIsoValue);
             }
 
             // Set as reference if first item (BEFORE any transformation)
             const isFirstItem = !this.referenceStructure && !this.referenceVolume;
 
+            // Align to existing reference
             if (this.referenceStructure) {
-                // Align to reference structure
-                volume = await this.centerVolumeOnReference(volume);  // This changes the ref!
+                // Align volume to reference structure
+                console.log("[VIEWER] Centering volume on reference structure");
+                volume = await this.centerVolumeOnReference(volume);
+            } else if (this.referenceVolume) {
+                // FIX: Align volume to reference volume
+                console.log("[VIEWER] Centering volume on reference volume");
+                volume = await this.centerVolumeOnVolume(volume, this.referenceVolume.data!);
             }
 
             // Store reference AFTER transformation
             if (isFirstItem) {
-                this.referenceVolume = volume;  // CHANGE: store selector
+                this.referenceVolume = volume;
                 this.referenceVolumeId = itemId;
                 this.referenceType = 'volume';
+                console.log("[VIEWER] Set volume as reference:", itemId, "ref:", volume.ref);
             }
 
             const reprRef = await createVolumeRepresentation(this.plugin, volume, assignedColor, actualIsoValue);
@@ -252,6 +327,7 @@ export class AlignmentViewer {
             this.loadedItems.set(itemId, item);
             this.notifyChange();
 
+            console.log("[VIEWER] Volume loaded successfully, isInverted:", isInverted);
             return item;
         } catch (e) {
             console.error("[VIEWER] Error loading local volume:", e);
