@@ -15,36 +15,21 @@
         }
         
         #controls {
-            width: 320px;
+            width: 340px;
             padding: 16px;
             background: #f5f5f5;
             border-right: 1px solid #ddd;
             overflow-y: auto;
         }
         
-        #viewer-container {
-            flex: 1;
-            position: relative;
-        }
+        #viewer-container { flex: 1; position: relative; }
         
-        h3 {
-            margin: 16px 0 8px 0;
-            font-size: 14px;
-            color: #333;
-        }
-        
+        h3 { margin: 16px 0 8px 0; font-size: 14px; color: #333; }
         h3:first-child { margin-top: 0; }
         
-        .input-group {
-            margin-bottom: 12px;
-        }
+        .input-group { margin-bottom: 12px; }
         
-        label {
-            display: block;
-            font-size: 12px;
-            color: #666;
-            margin-bottom: 4px;
-        }
+        label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
         
         input[type="text"], input[type="number"], select {
             width: 100%;
@@ -65,24 +50,11 @@
             transition: background 0.2s;
         }
         
-        button.primary {
-            background: #2563eb;
-            color: white;
-        }
-        
+        button.primary { background: #2563eb; color: white; }
         button.primary:hover { background: #1d4ed8; }
-        
-        button.secondary {
-            background: #e5e7eb;
-            color: #374151;
-        }
-        
+        button.secondary { background: #e5e7eb; color: #374151; }
         button.secondary:hover { background: #d1d5db; }
-        
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
         
         #log {
             margin-top: 16px;
@@ -91,7 +63,7 @@
             color: #0f0;
             font-family: monospace;
             font-size: 11px;
-            height: 150px;
+            height: 120px;
             overflow-y: auto;
             border-radius: 4px;
         }
@@ -101,24 +73,112 @@
         
         .loaded-item {
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            padding: 6px 8px;
+            gap: 8px;
+            padding: 8px;
             background: white;
             border: 1px solid #ddd;
             border-radius: 4px;
             margin-bottom: 4px;
             font-size: 12px;
+            position: relative;
         }
         
+        .loaded-item .info { flex: 1; min-width: 0; }
         .loaded-item .id { font-weight: 600; }
         .loaded-item .type { color: #666; font-size: 11px; }
+        
         .loaded-item .ref-badge {
             background: #fef3c7;
             color: #92400e;
             padding: 2px 6px;
             border-radius: 3px;
             font-size: 10px;
+            margin-left: 4px;
+        }
+        
+        .item-controls {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .icon-btn {
+            width: 26px;
+            height: 26px;
+            padding: 0;
+            margin: 0;
+            border: none;
+            background: none;
+            cursor: pointer;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .icon-btn:hover { background: #e5e7eb; color: #333; }
+        .icon-btn.hidden-state { color: #bbb; }
+        .icon-btn.delete:hover { background: #fee2e2; color: #dc2626; }
+        
+        .color-swatch-btn {
+            width: 26px;
+            height: 26px;
+            padding: 0;
+            margin: 0;
+            border: 2px solid #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .color-swatch-btn:hover {
+            border-color: #666;
+        }
+        
+        /* Color palette popup */
+        .color-palette {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            z-index: 100;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            display: none;
+            width: 200px;
+        }
+        
+        .color-palette.open {
+            display: block;
+        }
+        
+        .color-palette-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 4px;
+        }
+        
+        .palette-swatch {
+            width: 26px;
+            height: 26px;
+            border: 1px solid rgba(0,0,0,0.1);
+            border-radius: 3px;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        
+        .palette-swatch:hover {
+            transform: scale(1.15);
+            border-color: #333;
+            z-index: 1;
+        }
+        
+        .palette-swatch.selected {
+            border: 2px solid #000;
         }
         
         .emdb-suggestion {
@@ -127,16 +187,9 @@
             margin-top: 4px;
             cursor: pointer;
         }
+        .emdb-suggestion:hover { text-decoration: underline; }
         
-        .emdb-suggestion:hover {
-            text-decoration: underline;
-        }
-        
-        hr {
-            border: none;
-            border-top: 1px solid #ddd;
-            margin: 16px 0;
-        }
+        hr { border: none; border-top: 1px solid #ddd; margin: 16px 0; }
     </style>
 </head>
 <body>
@@ -181,23 +234,21 @@
     <div id="viewer-container"></div>
 
     <script type="module">
-        import { createAlignmentViewer, fetchEmdbIds } from './dist/molstar-lib.js';
+        import { createAlignmentViewer, fetchEmdbIds, COLOR_PALETTE } from './dist/molstar-lib.js';
         
         let viewer = null;
-        const loadedItems = [];
+        let openPaletteId = null;
         
-        const pdbInput = document.getElementById('pdb-input');
-        const loadStructureBtn = document.getElementById('load-structure-btn');
-        
-        const emdbInput = document.getElementById('emdb-input');
-        const emdbSuggestion = document.getElementById('emdb-suggestion');
-        const detailLevel = document.getElementById('detail-level');
-        const emdbServer = document.getElementById('emdb-server');
-        const loadMapBtn = document.getElementById('load-map-btn');
-        
-        const clearBtn = document.getElementById('clear-btn');
+        const pdbInput             = document.getElementById('pdb-input');
+        const loadStructureBtn     = document.getElementById('load-structure-btn');
+        const emdbInput            = document.getElementById('emdb-input');
+        const emdbSuggestion       = document.getElementById('emdb-suggestion');
+        const detailLevel          = document.getElementById('detail-level');
+        const emdbServer           = document.getElementById('emdb-server');
+        const loadMapBtn           = document.getElementById('load-map-btn');
+        const clearBtn             = document.getElementById('clear-btn');
         const loadedItemsContainer = document.getElementById('loaded-items');
-        const logContainer = document.getElementById('log');
+        const logContainer         = document.getElementById('log');
         
         function log(msg, type = '') {
             const line = document.createElement('div');
@@ -207,22 +258,105 @@
             logContainer.scrollTop = logContainer.scrollHeight;
         }
         
-        function updateLoadedItems() {
-            loadedItemsContainer.innerHTML = loadedItems.map(item => `
-                <div class="loaded-item">
-                    <div>
-                        <span class="id">${item.id}</span>
-                        <span class="type">${item.type}${item.format ? ` (${item.format})` : ''}</span>
+        function colorToHex(color) {
+            return '#' + color.toString(16).padStart(6, '0');
+        }
+        
+        function renderColorPalette(itemId, currentColor) {
+            return `
+                <div class="color-palette" id="palette-${itemId}">
+                    <div class="color-palette-grid">
+                        ${COLOR_PALETTE.map(c => `
+                            <div class="palette-swatch ${c === currentColor ? 'selected' : ''}" 
+                                 style="background-color: ${colorToHex(c)}"
+                                 data-color="${c}">
+                            </div>
+                        `).join('')}
                     </div>
-                    ${item.isReference ? '<span class="ref-badge">REF</span>' : ''}
+                </div>
+            `;
+        }
+        
+        function renderLoadedItems() {
+            const items = viewer.getLoadedItems();
+            
+            loadedItemsContainer.innerHTML = items.map(item => `
+                <div class="loaded-item" data-id="${item.id}">
+                    <div class="item-controls">
+                        <button class="icon-btn visibility-btn ${item.visible ? '' : 'hidden-state'}" title="Toggle visibility">
+                            ${item.visible ? '&#128065;' : '&#128065;&#8203;'}
+                        </button>
+                        <button class="color-swatch-btn" 
+                                style="background-color: ${colorToHex(item.color)}"
+                                title="Change color">
+                        </button>
+                    </div>
+                    <div class="info">
+                        <span class="id">${item.id}</span>
+                        <span class="type">${item.type}${item.type === 'structure' ? ` (${item.format})` : ''}</span>
+                        ${item.type === 'structure' && item.isReference ? '<span class="ref-badge">REF</span>' : ''}
+                    </div>
+                    <button class="icon-btn delete" title="Delete">&times;</button>
+                    ${renderColorPalette(item.id, item.color)}
                 </div>
             `).join('');
+            
+            // Attach event listeners
+            loadedItemsContainer.querySelectorAll('.loaded-item').forEach(el => {
+                const id = el.dataset.id;
+                
+                el.querySelector('.visibility-btn').addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const item = viewer.getLoadedItems().find(i => i.id === id);
+                    if (item) {
+                        await viewer.setItemVisibility(id, !item.visible);
+                    }
+                });
+                
+                el.querySelector('.color-swatch-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const palette = el.querySelector('.color-palette');
+                    
+                    // Close other palettes
+                    document.querySelectorAll('.color-palette.open').forEach(p => {
+                        if (p !== palette) p.classList.remove('open');
+                    });
+                    
+                    palette.classList.toggle('open');
+                    openPaletteId = palette.classList.contains('open') ? id : null;
+                });
+                
+                el.querySelectorAll('.palette-swatch').forEach(swatch => {
+                    swatch.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        const color = parseInt(swatch.dataset.color);
+                        await viewer.setItemColor(id, color);
+                        el.querySelector('.color-palette').classList.remove('open');
+                        openPaletteId = null;
+                    });
+                });
+                
+                el.querySelector('.delete').addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await viewer.deleteItem(id);
+                    log(`Deleted ${id}`);
+                });
+            });
         }
+        
+        // Close palette when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.color-swatch-btn') && !e.target.closest('.color-palette')) {
+                document.querySelectorAll('.color-palette.open').forEach(p => p.classList.remove('open'));
+                openPaletteId = null;
+            }
+        });
         
         async function init() {
             try {
                 log('Initializing viewer...', 'info');
                 viewer = await createAlignmentViewer(document.getElementById('viewer-container'));
+                viewer.onChange(renderLoadedItems);
                 log('Viewer ready');
                 loadMapBtn.disabled = false;
             } catch (e) {
@@ -233,37 +367,24 @@
         
         loadStructureBtn.addEventListener('click', async () => {
             const pdbId = pdbInput.value.trim().toUpperCase();
-            
-            if (!pdbId) {
-                log('Enter a PDB ID', 'error');
-                return;
-            }
+            if (!pdbId) { log('Enter a PDB ID', 'error'); return; }
             
             loadStructureBtn.disabled = true;
             loadStructureBtn.textContent = 'Loading...';
             
             try {
                 log(`Loading structure ${pdbId}...`, 'info');
-                const { format } = await viewer.loadStructure(pdbId);
+                const item = await viewer.loadStructure(pdbId);
+                log(`Structure ${pdbId} loaded via ${item.format} (reference: ${item.isReference})`);
                 
-                const isReference = loadedItems.filter(i => i.type === 'structure').length === 0;
-                loadedItems.push({ id: pdbId, type: 'structure', format, isReference });
-                updateLoadedItems();
-                
-                log(`Structure ${pdbId} loaded via ${format} (reference: ${isReference})`);
-                
-                // Fetch and suggest EMDB IDs
                 emdbSuggestion.textContent = '';
                 const emdbIds = await fetchEmdbIds(pdbId);
                 if (emdbIds.length > 0) {
                     const firstId = emdbIds[0].replace('EMD-', '');
                     emdbSuggestion.textContent = `Suggested: ${emdbIds.join(', ')}`;
-                    emdbSuggestion.onclick = () => {
-                        emdbInput.value = firstId;
-                    };
+                    emdbSuggestion.onclick = () => { emdbInput.value = firstId; };
                     emdbInput.value = firstId;
                 }
-                
             } catch (e) {
                 log(`Failed to load structure: ${e.message}`, 'error');
                 console.error(e);
@@ -278,10 +399,7 @@
             const detail = parseInt(detailLevel.value) || 3;
             const server = emdbServer.value;
             
-            if (!emdbId) {
-                log('Enter an EMDB ID', 'error');
-                return;
-            }
+            if (!emdbId) { log('Enter an EMDB ID', 'error'); return; }
             
             loadMapBtn.disabled = true;
             loadMapBtn.textContent = 'Loading...';
@@ -289,11 +407,7 @@
             try {
                 log(`Loading EMDB map ${emdbId}...`, 'info');
                 await viewer.loadEmdbMap(emdbId, { detail, server });
-                
-                loadedItems.push({ id: `EMD-${emdbId.replace('EMD-', '').replace('emd-', '')}`, type: 'map', isReference: false });
-                updateLoadedItems();
                 log(`Map loaded`);
-                
             } catch (e) {
                 log(`Failed to load map: ${e.message}`, 'error');
                 console.error(e);
@@ -306,8 +420,6 @@
         clearBtn.addEventListener('click', async () => {
             try {
                 await viewer.clear();
-                loadedItems.length = 0;
-                updateLoadedItems();
                 emdbSuggestion.textContent = '';
                 log('Cleared all');
             } catch (e) {
